@@ -21,3 +21,5 @@ Marstek Venus besturing met ESP32 over ModBus.
 
 Ontwikkkeling:
 12-01-2025 - Eerste versie van de documentatie, ModBus getest met een USB converter onder Linux, programmeren gestart.
+12-01-2025 - Uitlezen P1 dongle (WiFi) werkt inmiddels.  Dongle iP1_Dongle_Pro van smart-stuff.nl
+
