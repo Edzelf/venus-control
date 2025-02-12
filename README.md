@@ -1,3 +1,6 @@
+
+![logo](https://github.com/user-attachments/assets/343db925-dc42-4a91-88b5-51ac631e3bb0)
+
 Deze repositry beschrijft de ontwikkelingen m.b.t. de Marstek Venus-E.  De bedoeling is om te komen tot een stabiele en verbeterde regeling van de batterij.
 
 De huidige versie maakt gebruik van een Marstek CT003 P1-dongle.  Deze lijkt niet erg stabiel.  Bovendien lijkt de interne regeling v.w.b. “nul op de meter” (NOM) niet overtuigend te werken.  De software van de batterij, momenteel versie 147 is niet open-source, waardoor je afhankelijk bent van de leverancier.
