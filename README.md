@@ -7,6 +7,7 @@ De huidige versie maakt gebruik van een Marstek CT003 P1-dongle.  Deze lijkt nie
 
 Plannen voor de verbeterde versie zijn:
 * Open source software (PlatformIO, ESP32, Arduino).
+* Onafhankelijk maken van externe servers.
 * Goede documentatie.
 * Sturing via ModBus.
 * Vrije keus van P1-dongle.
