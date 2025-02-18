@@ -23,4 +23,6 @@ Ontwikkkeling:
 * 12-02-2025 - Eerste versie van de documentatie, ModBus getest met een USB converter onder Linux, programmeren gestart.
 * 12-02-2025 - Uitlezen P1 dongle (WiFi) werkt inmiddels.  Dongle iP1_Dongle_Pro van smart-stuff.nl
 * 13-02-2025 - Simulatie dongle gemaakt.  Dient om later een besturingsmodel te kunnen testen.
-* 14-02-2025 - Print prototype gemaakt.  ModBus communicatie met deze pring getest, werkt!
+* 14-02-2025 - Print prototype gemaakt.  ModBus communicatie met deze print getest, werkt!
+* 17-02-2025 - Debugging ModBus communicatie.
+* 18-02-2025 - Webinterface gemaakt. Tonen van procesgegevens in primitieve vorm.
