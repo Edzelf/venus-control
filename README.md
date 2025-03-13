@@ -28,7 +28,9 @@ Ontwikkkeling:
 * 18-02-2025 - Webinterface gemaakt. Tonen van procesgegevens in primitieve vorm.
 * 26-02-2025 - Eerste versie werkt nu.  De besturing probeert de inkomende/teruggeleverde energie op nul te houden.
 * 04-03-2025 - Uitgebreid getest.  Print ontworpen en besteld bij PCBWay.
+* 13-03-2025 - Print gereed. Duurtest gestart.
 
-![image](https://github.com/user-attachments/assets/caf84ee4-8b4e-4d99-9723-01b6c23650d0)
+![image](https://github.com/user-attachments/assets/3c637cd9-2cd4-4d71-962b-d980cc887dc8)
+
 
  
