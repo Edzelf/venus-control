@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head>
+ <title>Venus-control</title>
+ <link rel="Shortcut Icon" type="image/ico" href="favicon.ico">
+ <link rel='stylesheet' type='text/css' href='style.css'>
+ <meta http-equiv="content-type" content="text/html; charset=ISO-8859-1">
+</head>
+<body>
+ <ul> 
+  <li><a class='pull-left' href='index.html'>Home</a></li> 
+  <li><a class='pull-left active' href='manual.html'>Handmatig</a></li> 
+  <li><a class='pull-left' href='config.html'>Config</a></li> 
+  <li><a class='pull-left' href='logging.html'>Logging</a></li> 
+  <li><a class='pull-left' href='about.html'>Over</a></li> 
+ </ul>
+ <br><br>
+ <p>Vul hier de gewenste regeling in:</p>
+ <input type="radio" id="nom" name="regeling" value ="nom" onclick="radioclick('nom')">
+ <label for="nom">Nul op de meter</label><br>
+ <input type="radio" id="stb" name="regeling" value="stb" onclick="radioclick('stb')">
+ <label for="stb">Stand-by</label><br>
+ <input type="radio" id="man" name="regeling" value="man" onclick="radioclick('man')">
+ <label for="man">Handmatige instelling (zie hieronder)</label>
+ <br><br><br>
+ <label for="vermogen">Instelling indien handmatig gekozen:</label>
+ <br><br>
+ <select name="vermogen" id="vermogen">
+   <option value="n.v.t.">n.v.t.</option>
+   <option value=-200>Laden met 200 Watt</option>
+   <option value=-500>Laden met 500 Watt</option>
+   <option value=-1000>Laden met 1000 Watt</option>
+   <option value=-1500>Laden met 1500 Watt</option>
+   <option value=-2000>Laden met 2000 Watt</option>
+   <option value=-2500>Laden met 2500 Watt</option>
+   <option value=200>Ontladen met 200 Watt</option>
+   <option value=400>Ontladen met 400 Watt</option>
+   <option value=600>Ontladen met 600 Watt</option>
+   <option value=800>Ontladen met 800 Watt</option>
+ </select>
+ <br><br>
+ &nbsp;&nbsp;&nbsp;&nbsp;
+ <button class="button" onclick="fsav()">Opslaan</button>
+ <br><br>
+ <input type="text" size="40" id="resultstr" placeholder='Kies instelling en druk op "Opslaan"'>
+ 
+<script>
+var jsontxt ;                     // JSON struct from main program
+var mode ;                        // Selected mode
+
+function radioclick(a)
+{
+  mode = a ;                      // Bewaar de geselcteerde mode
+  if ( mode != "man" )            // Mode is "man"?
+  {
+    vermogen.value = "n.v.t." ;   // Nee, vermogen is niet van toepassing
+  }
+}
+
+function myLoad()
+{
+  // Request for current status
+  var theUrl = "getstatus?version=" + Math.random() ;
+  var xhr = new XMLHttpRequest() ;
+  xhr.onreadystatechange = function() {
+    if ( xhr.readyState == XMLHttpRequest.DONE )
+    {
+      jsontxt = xhr.responseText ;
+      const obj = JSON.parse ( jsontxt ) ;
+      mode = obj["Controller mode"] ;
+      setpoint = obj["Manual setpoint"] ;
+      if ( mode == "man" )
+      {
+        man.checked = true ;
+        vermogen.value = setpoint ;
+      }
+      else if ( mode == "stb" )
+      {
+        stb.checked = true ;
+        vermogen.selectedIndex = 0 ;
+      }
+      else
+      {
+        nom.checked = true ;
+        vermogen.selectedIndex = 0 ;
+      }
+    }
+  }
+  xhr.open ( "GET", theUrl, false ) ;
+  xhr.send() ;
+}
+
+// Bewaar de intellingen
+function fsav()
+{
+  var setpoint ;
+  var theUrl = "savemode?version=" + Math.random() + "&" ;
+  var xhr = new XMLHttpRequest() ;
+  xhr.onreadystatechange = function()
+  {
+    if ( xhr.readyState == XMLHttpRequest.DONE )
+    {
+      resultstr.value = xhr.responseText ;
+    }
+  }
+  setpoint = vermogen.options[vermogen.selectedIndex].value ;
+  theUrl += "mode=" + mode + "&" ;    // Voeg mode toe
+  theUrl += "setpoint=" + setpoint ;
+  xhr.open ( "POST", theUrl, true ) ;
+  xhr.setRequestHeader ( "Content-type", "application/x-www-form-urlencoded" ) ;
+  xhr.send () ;
+}
+
+
+myLoad() ;
+</script>
+</body>
+</html>
+<noscript>
+  Sorry, web-interface werkt niet zonder JavaScript!
+</noscript>

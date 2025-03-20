@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+ <head>
+  <title>Logging Venus-control</title>
+  <link rel='stylesheet' type='text/css' href='style.css'>
+  <meta http-equiv="content-type" content="text/html; charset=ISO-8859-1">
+  <link rel="Shortcut Icon" type="image/ico" href="favicon.ico">
+  <link rel="stylesheet" type="text/css" href="style.css">
+ </head>
+ <body>
+  <ul>
+   <li><a class='pull-left' href='index.html'>Home</a></li>
+   <li><a class='pull-left' href='manual.html'>Handmatig</a></li> 
+   <li><a class='pull-left' href='config.html'>Config</a></li> 
+   <li><a class='pull-left active' href='logging.html'>Logging</a></li> 
+   <li><a class='pull-left' href='about.html'>Over</a></li> 
+   </ul>
+  <center>
+   <h1>** Logging Venus-control **</h1>
+   <textarea rows="30"; cols="100"; style="font-size: 80%"; id="logs";>Loading recent debug lines</textarea>
+   <br>
+   <button class="button" onclick="loadText('/logging?func=c')">Wis</button>
+  </center>
+
+   <script>
+     // Load recent log lines
+     function loadText ( source )
+     {
+       var xhr = new XMLHttpRequest() ;
+       xhr.onreadystatechange = function()
+       {
+         if ( xhr.readyState == XMLHttpRequest.DONE )
+          {
+            logs.value = xhr.responseText ;
+          }
+       }
+       xhr.open ( "GET", source, false ) ;
+       xhr.send() ;
+     }
+     // Fill text area with debug lines.
+     loadText ( "/logging" ) ;
+    </script>
+  </body>
+</html>

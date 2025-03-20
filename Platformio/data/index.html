@@ -1,0 +1,260 @@
+<!doctype html>
+<html>
+<head>
+ <meta charset="utf-8">
+ <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+ <title>Venus-control</title>
+ <script type="text/javascript" src="Chart.min.js"></script>
+ <script type="text/javascript" src="gauge.min.js"></script>
+ <style>
+  canvas {-moz-user-select: none; -webkit-user-select: none; -ms-user-select: none; }
+ </style>
+ <link rel='stylesheet' type='text/css' href='style.css'>
+ <link rel="Shortcut Icon" type="image/ico" href="favicon.ico">
+</head>
+<body>
+ <ul> 
+  <li><a class='pull-left active' href='index.html'>Home</a></li> 
+  <li><a class='pull-left' href='manual.html'>Handmatig</a></li> 
+  <li><a class='pull-left' href='config.html'>Config</a></li> 
+  <li><a class='pull-left' href='logging.html'>Logging</a></li> 
+  <li><a class='pull-left' href='about.html'>Over</a></li> 
+ </ul>
+<br><br><br>
+<center>
+ <img src="logo.png" alt="Venus logo"><br>
+ <table>
+  <tr>
+   <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id1"></canvas></td>
+   <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id2"></canvas></td>
+  </tr>
+  <tr>
+    <td bgcolor="#b0b3b7"><input type="text" id="g1_str" size="30" ></td>
+    <td bgcolor="#b0b3b7"><input type="text" id="g2_str" size="30" ></td>
+  </tr>
+ </table>
+ <br>
+ <table style="width:70%">
+  <tr>
+   <td bgcolor="#c9ced6"><canvas id="canvas-chart"></canvas></td>
+  </tr>
+ </table>
+ <br><br>
+ <input type="text" id="statstr" size="80" >
+</center>
+
+<script>
+
+  function onloadfunc()
+  {
+    var opts_1 =
+    {
+      angle: 0.03,              // The span of the gauge arc
+      radiusScale: 1.0,
+      lineWidth: 0.44,          // The line thickness
+      pointer:
+      {
+        length: 0.7,            // Relative to gauge radius
+        strokeWidth: 0.035      // The thickness
+      },
+      colorStart: '#6FADCF',    // Colors
+      colorStop: '#8FC0DA',     // just experiment with them
+      strokeColor: '#E0E0E0',   // to see which ones work best for you
+      staticZones:
+      [
+        { strokeStyle: "#F00000", min: -800, max: 0 }, // Red from 100 to 130
+        { strokeStyle: "#00F000", min: 0, max: 2400 }, // Green
+      ],
+      renderTicks:
+      {
+        divisions: 8,
+        divWidth: 1.6,
+        divLength: 0.5,
+        divColor: '#080D33',
+        subDivisions: 2,
+        subLength: 0.2,
+        subWidth: 1.2,
+        subColor: '#66641D'
+      },
+      staticLabels:
+      {
+        font: "10px sans-serif",  // Specifies font
+        labels: [ -800, -400, 0, 400, 800, 1200, 1600, 2000, 2400 ],  // Print labels at these values
+        color: "#000000",         // Optional: Label text color
+        fractionDigits: 0         // Optional: Numerical precision. 0=round off.
+      },
+    } ;
+    var opts_2 =
+    {
+      angle: 0.03,                // The span of the gauge arc
+      lineWidth: 0.44,            // The line thickness
+      pointer:
+      {
+        length: 0.7,              // Relative to gauge radius
+        strokeWidth: 0.035        // The thickness
+      },
+      colorStart: '#6FADCF',      // Colors
+      colorStop: '#8FC0DA',       // just experiment with them
+      strokeColor: '#E0E0E0',     // to see which ones work best for you
+      staticZones:
+      [
+        { strokeStyle: "#F00000", min: 0, max: 10 },    // Red from 100 to 130
+        { strokeStyle: "#00F000", min: 10, max: 100 },  // Green
+      ],
+      renderTicks:
+      {
+        divisions: 10,
+        divWidth: 1.6,
+        divLength: 0.5,
+        divColor: '#080D33',
+        subDivisions: 2,
+        subLength: 0.2,
+        subWidth: 1.2,
+        subColor: '#66641D'
+      },
+      staticLabels:
+      {
+        font: "10px sans-serif",                        // Specifies font
+        labels: [ 0, 20, 40, 60, 80, 100 ],             // Print labels at these values
+        color: "#000000",                               // Label text color
+        fractionDigits: 0                               // Numerical precision. 0=round off.
+      },
+    }
+    var targetg1 = document.getElementById ( 'canvas-gauge-id1' ) ;
+    gauge1 = new Gauge ( targetg1 ).setOptions ( opts_1 ) ; // create sexy gauge!
+    gauge1.maxValue = 2400 ;              // set max gauge value
+    gauge1.setMinValue ( -800 ) ;         // set min value
+    gauge1.set ( 1250 ) ;                 // set actual value
+
+    var targetg2 = document.getElementById ( 'canvas-gauge-id2' ) ;
+    gauge2 = new Gauge ( targetg2 ).setOptions ( opts_2 ) ; // create sexy gauge!
+    gauge2.maxValue = 100 ;               // set max gauge value
+    gauge2.setMinValue ( 0 ) ;            // set min value
+    gauge2.set ( 20 ) ;                   // set actual value
+
+    var ctx = document.getElementById ( 'canvas-chart' ).getContext ( '2d' ) ;
+    window.myLine = new Chart ( ctx, chconfig ) ;
+  }
+
+  function AddNewData(temp)               // Paremeters zijn 2 temperaturen, gescheiden door "|"
+  {
+   var pIn, pOut ;
+   var now = new Date() ;
+   var fth = now.getHours() ;
+   var ftm = now.getMinutes() ;
+   var fts = now.getSeconds() ;
+
+   if ( fth < 10 )   fth = "0" + fth ;
+   if ( ftm < 10 ) ftm = "0" + ftm ;
+   if ( fts < 10 ) fts = "0" + fts ;
+   const obj = JSON.parse ( jsontxt ) ;
+   pIn = obj["Power in"] ;
+   pOut = obj["Setpoint"] ;
+   soc = obj["SOC"] ;
+   mode = obj["Controller mode"] ;
+   statstr.value = obj["Controller tekst"] ;
+   chconfig.data.labels.push ( fth + ":" + ftm + ":" + fts ) ;
+   chconfig.data.datasets[0].data.push ( pIn ) ;
+   chconfig.data.datasets[1].data.push ( pOut ) ;
+   chconfig.options.title.text = "Venus regeling " + "\"" + mode + "\"";
+   window.myLine.update() ;
+   g2_str.value = "Batterij gevuld voor " + soc + "%" ;
+   if ( pOut < 0 )
+   {
+    g1_str.value = "Batterij laden met " + ( -pOut ) + "W" ;
+   }
+   else if ( pOut > 0 )
+   {
+    g1_str.value = "Batterij ontladen met " + pOut + "W" ;
+   }
+   else
+   {
+    g1_str.value = "Batterij in stand-by modus" ;
+   }
+   gauge1.set ( -pOut ) ;                   // Gauge altijd updaten
+   gauge2.set ( soc ) ;
+  }
+
+
+function myRefresh()
+{
+  // Request for current status
+  var theUrl = "getstatus?version=" + Math.random() ;
+  var xhr = new XMLHttpRequest() ;
+  xhr.onreadystatechange = function() {
+    if ( xhr.readyState == XMLHttpRequest.DONE )
+    {
+      jsontxt = xhr.responseText ;
+      AddNewData() ;
+    }
+  }
+  xhr.open ( "GET", theUrl, false ) ;
+  xhr.send() ;
+}
+
+var jsontxt ;
+var gauge1 ;
+var gauge2 ;
+var mode ;
+var chconfig = {
+  type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Netto verbruik',
+        backgroundColor: "#3e95cd",
+        borderColor: "#3e95cd",
+        data: [],
+        fill: false,
+      },
+      {
+       label: 'Batterij',
+       backgroundColor: "#373737",
+       borderColor: "#373737",
+       data: [],
+       fill: false,
+      }
+      ]},
+    options: {
+      responsive: true,
+      title: {
+        display: true,
+        text: 'Venus regeling'
+      },
+      tooltips: {
+        mode: 'index',
+        intersect: false,
+      },
+      hover: {
+        mode: 'nearest',
+        intersect: true
+      },
+      scales: {
+        xAxes: [{
+          display: true,
+          scaleLabel: {
+            display: true,
+            labelString: 'Tijdstip'
+          }
+        }],
+        yAxes: [{
+          display: true,
+          ticks: { suggestedMin: -10, suggestedMax: 40 },
+          scaleLabel: {
+            display: true,
+            labelString: 'Vermogens[W]'
+          }
+        }]
+      }
+    }
+  } ;
+onloadfunc() ;
+myRefresh() ;
+id2 = setInterval ( myRefresh, 5000 ) ;
+</script>
+</body>
+</html>
+<noscript>
+  Sorry, web-interface werkt niet zonder JavaScript!
+</noscript>
