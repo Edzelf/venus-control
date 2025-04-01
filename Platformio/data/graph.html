@@ -1,0 +1,163 @@
+<!doctype html>
+<html>
+<head>
+ <meta charset="utf-8">
+ <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+ <title>Venus-control</title>
+ <script type="text/javascript" src="Chart.min.js"></script>
+ <link rel='stylesheet' type='text/css' href='style.css'>
+ <link rel="Shortcut Icon" type="image/ico" href="favicon.ico">
+</head>
+<body>
+ <ul> 
+  <li><a class='pull-left' href='index.html'>Home</a></li>
+  <li><a class='pull-left active' href='graph.html'>Grafieken</a></li>
+  <li><a class='pull-left' href='manual.html'>Handmatig</a></li> 
+  <li><a class='pull-left' href='config.html'>Config</a></li> 
+  <li><a class='pull-left' href='logging.html'>Logging</a></li> 
+  <li><a class='pull-left' href='about.html'>Over</a></li> 
+ </ul>
+<br><br><br>
+<center>
+ <table style="width:70%">
+  <tr>
+   <td bgcolor="#c9ced6"><canvas id="canvas-chart"></canvas></td>
+  </tr>
+ </table>
+ <br><br>
+ <input type="text" id="statstr" size="80" >
+</center>
+
+<script>
+
+  function onloadfunc()
+  {
+    var ctx = document.getElementById ( 'canvas-chart' ).getContext ( '2d' ) ;
+    window.myLine = new Chart ( ctx, chconfig ) ;
+    // Request for current graph data
+    var theUrl = "/getgraph?version=" + Math.random() ;
+    var xhr = new XMLHttpRequest() ;
+    var i ;                                             // Index in struct statinfo_t
+    var j ;                                             // Index in int16_t array
+    var pIn, pOut, soc ;                                // Variabelen uit array
+    xhr.onreadystatechange = function() {
+      if ( xhr.readyState == XMLHttpRequest.DONE )
+      {
+        const STATSIZ = 100 ;                           // Aantal datapunten
+        const buf = xhr.response ;
+        i = xhr.getResponseHeader ( "Index" ) ;
+        for ( let k = 0 ; k < STATSIZ ; k++ )           // Ga alle punten langs
+        {
+          j = i * 6 ;                                   // Index in byte array
+          let x0 = buf.charCodeAt ( j++ ) & 0xFF ;      // Haal bytes uit het array
+          let x1 = buf.charCodeAt ( j++ ) & 0xFF ;
+          let x2 = buf.charCodeAt ( j++ ) & 0xFF ;
+          let x3 = buf.charCodeAt ( j++ ) & 0xFF ;
+          let x4 = buf.charCodeAt ( j++ ) & 0xFF ;
+          if ( x4 != 0 )
+          {
+            pIn  = ( x0 | ( x1 << 8 ) ) - 0x8000 ;      // Bepaaal pIn
+            pOut = ( x2 | ( x3 << 8 ) ) - 0x8000 ;      // Bepaal pOut
+            soc  = x4 ;                                 // Bepaal soc
+            var lab = ( k - STATSIZ ) * 10 ;            // Seconden als label
+            AddNewData ( pIn, -pOut, soc, lab ) ;       // Zet in grafiek
+          }
+          if ( ++i >= STATSIZ )                         // Volgende punt.  Einde bereikt
+          {
+            i = 0 ;                                     // Ja, round robin
+          }
+        }
+      }
+    }
+    xhr.open ( "GET", theUrl, false ) ;
+    xhr.send() ;
+  }
+
+  function AddNewData ( pIn, pOut, soc, lab )
+  {
+   chconfig.data.labels.push ( lab ) ;
+   chconfig.data.datasets[0].data.push ( pIn ) ;
+   chconfig.data.datasets[1].data.push ( pOut ) ;
+   chconfig.data.datasets[2].data.push ( soc ) ;
+   window.myLine.update() ;
+  }
+
+
+var jsontxt ;
+var mode ;
+var chconfig = {
+  type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Netto verbruik',
+        backgroundColor: "#3e95cd",
+        borderColor: "#3e95cd",
+        data: [],
+        fill: false,
+      },
+      {
+       label: 'Batterij',
+       backgroundColor: "#373737",
+       borderColor: "#373737",
+       data: [],
+       fill: false,
+      },
+      {
+        label: 'Lading',
+        backgroundColor: "#D13537",
+        borderColor: "#D13537",
+        data: [],
+        fill: false,
+       }
+ 
+      ]},
+    options: {
+      responsive: true,
+      title: {
+        display: true,
+        text: 'Venus regeling'
+      },
+      tooltips: {
+        mode: 'index',
+        intersect: false,
+      },
+      hover: {
+        mode: 'nearest',
+        intersect: true
+      },
+      scales: {
+        xAxes: [{
+          display: true,
+          scaleLabel: {
+            display: true,
+            labelString: 'Tijdstip'
+          }
+        }],
+        yAxes: [{
+          display: true,
+          ticks: { suggestedMin: 0, suggestedMax: 800 },
+          scaleLabel: {
+            display: true,
+            labelString: 'Vermogens[W]'
+          }
+        },
+        {
+          display: true,
+          ticks: { suggestedMin: 0, suggestedMax: 100 },
+          scaleLabel: {
+            display: true,
+            labelString: 'Lading[%]'
+          }
+        }]
+      }
+    }
+  } ;
+onloadfunc() ;
+</script>
+</body>
+</html>
+<noscript>
+  Sorry, web-interface werkt niet zonder JavaScript!
+</noscript>

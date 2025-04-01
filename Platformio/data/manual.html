@@ -9,6 +9,7 @@
 <body>
  <ul> 
   <li><a class='pull-left' href='index.html'>Home</a></li> 
+  <li><a class='pull-left' href='graph.html'>Grafieken</a></li>
   <li><a class='pull-left active' href='manual.html'>Handmatig</a></li> 
   <li><a class='pull-left' href='config.html'>Config</a></li> 
   <li><a class='pull-left' href='logging.html'>Logging</a></li> 
@@ -21,7 +22,9 @@
  <input type="radio" id="stb" name="regeling" value="stb" onclick="radioclick('stb')">
  <label for="stb">Stand-by</label><br>
  <input type="radio" id="man" name="regeling" value="man" onclick="radioclick('man')">
- <label for="man">Handmatige instelling (zie hieronder)</label>
+ <label for="man">Handmatige instelling (zie hieronder)</label><br>
+ <input type="radio" id="off" name="regeling" value="uit" onclick="radioclick('off')">
+ <label for="man">Uit</label>
  <br><br><br>
  <label for="vermogen">Instelling indien handmatig gekozen:</label>
  <br><br>
@@ -77,6 +80,11 @@ function myLoad()
       else if ( mode == "stb" )
       {
         stb.checked = true ;
+        vermogen.selectedIndex = 0 ;
+      }
+      else if ( mode == "off" )
+      {
+        off.checked = true ;
         vermogen.selectedIndex = 0 ;
       }
       else
