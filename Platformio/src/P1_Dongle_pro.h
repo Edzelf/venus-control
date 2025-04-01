@@ -1,4 +1,4 @@
-// P1_Dongle_Pro.h
+// P1_Dongle_pro.h
 // Module om data uit de JSON van deze dongle te halen.
 // De dongle wordt geleverd door "smart-stuff.nl".
 // De api is bereikbaar via http://<ip>/api/v2/sm/actual
@@ -38,16 +38,13 @@
 bool p1_dongle_pro_handle()
 {
   float p1, p2 ;                                                // Power gebruik en opwek
-  static uint16_t syncTiming = INT16_MAX ;                      // Om de klok te synchroniseren
-  const char*     strtim ;                                      // Timestamp uit P1
-  uint32_t        inttim ;                                      // Tijd (hhmmss)
 
+  if ( dongle_api.isEmpty() )                                   // API bekend?
+  {
+    dongle_api = "/api/v2/sm/actual" ;                          // Nee, set default
+  }
   if ( read_p1_dongle_http() )                                  // Lees JSON van P1 via http
   {
-    if ( dongle_api.isEmpty() )                                 // API bekend?
-    {
-      dongle_api = "/api/v2/sm/actual" ;                        // Nee, set default
-    }
     claimData ( "P1" ) ;                                        // Claim data gebied
     p1 = json_doc["power_delivered"]["value"] ;                 // Bepaal netto vermogen (grid naar huis)
     p2 = json_doc["power_returned"]["value"]  ;                 // Beide zijn in kW

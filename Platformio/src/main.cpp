@@ -25,8 +25,13 @@
 // History:                                                                                         *
 // 11-02-2025, ES: First set-up.                                                                    *
 // 20-03-2025, ES: Uitbreiding met handmatige instelling.                                           *
+// 21-03-2025, ES: Beveiliging bij uitvallen van P1 dongle.  Batterij gaat dan naar stand-by.       *
+// 25-03-2025, ES: Verbeterde ModBus driver, Homewizard P1 dongle.                                  *
+// 27-03-2025, ES: Driver voor Shelly Pro 3 energy meter.                                           *
+// 28-03-2025, ES: Grotere buffer voor JSON van P1 dongle, correctie ModBus enable.                 *
+// 30-03-2025, ES: Correctie inlezen P1 i.v.m. rare header in JSON bij Homewizard.                  *
 //***************************************************************************************************
-#define VERSION     "Thu, 20 Mar 2025 11:00:00 GMT"       // Current version
+#define VERSION     "Mon, 31 Mar 2025 17:40:00 GMT"       // Current version
 
 #include <Arduino.h>
 #include <soc/soc.h>                    // For brown-out detector setting
@@ -40,7 +45,6 @@
 #include <SPIFFS.h>
 #include <time.h>                       // Tijd functies
 #include <esp_sntp.h>                   // Idem voor time server
-#include <ModbusMaster.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include <nvs.h>
@@ -48,9 +52,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <vector>
-#include <ArduinoJson.h>                                 // JSON library
-#include <Adafruit_NeoPixel.h>                           // Voor de neopixel op pin 21
-#include "config.h"                                      // Configuratie definities
+#include <ArduinoJson.h>                                  // JSON library
+#include <Adafruit_NeoPixel.h>                            // Voor de neopixel op pin 21
+#include "Vmodbus.h"                                      // ModBus driver
+#include "config.h"                                       // Configuratie definities
 
 #define DEBUG_BUFFER_SIZE 160                             // Regellengte debugregel, exclusief tijd
 #define DEBUG_SAVE_LINES 1000                             // Te bewaren aantal logregels 
@@ -70,8 +75,12 @@
 #define MBtaskbit         0b0001                          // Mask for MBtask event
 #define readP1taskbit     0b0010                          // Mask for p1task
 #define controltaskbit    0b0100                          // Mask for controltask event
+#define savetaskbit       0b1000                          // Mask for savetask
 
-#define STATSIZ           100                             // Aaantal punten in de statinfo_t buffers
+#define MODBUS_ENABLE     0x55AA                          // RS485 control mode enable in register 42000
+#define MODBUS_DISABLE    0x55BB                          // RS485 control mode disable in register 42000
+
+#define STATSIZ           100                             // Aantal punten in de statinfo_t buffers
 
 //***************************************************************************************************
 // Forward declarations.                                                                            *
@@ -113,8 +122,9 @@ struct WifiInfo_t                               // For list with WiFi info
 
 struct statinfo_t                               // Statistiekbuffer, round robin
 {
-  int16_t pIn ;                                 // Met netto energie in Watts
-  int16_t pOut ;                                // Laad/ontlaad setting
+  uint16_t pIn ;                                // Netto energie in Watts + 32768
+  uint16_t pOut ;                               // Laad/ontlaad setting + 32768
+  uint8_t soc ;                                 // Percentage opgeladen
 } ;
 
 
@@ -129,22 +139,23 @@ const char*        fixedwifi = "" ;                     // Used for FIXEDWIFI op
 String             lssid, lpw ;                         // SSID and password from nvs or FIXEDWIFI
 char               netname[32] = NAME ;                 // Name of AP (if station mode goes wrong)
 bool               NetworkFound = false ;               // True if WiFi network connected in STA mode
-char               json_buf[1024] ;                     // Result from P1
+char               json_buf[2048] ;                     // Result from P1
+char*              json_begin = json_buf ;              // Begin JSON in json_buf
 char               controltext[128] ;                   // Status van controltask, dit is een tekst
-char               controlmod[8] = "nom";               // Controller mode, "stb", "nom" of "man"
+char               controlmod[4] = "nom";               // Controller mode, "stb", "nom", "off" of "man"
 int                man_setpoint ;                       // Setpoint in manual mode
-statinfo_t         stat_10sec[STATSIZ] ;                // Status per 10 seconden
+statinfo_t*        stat_10sec ;                         // Status per 10 seconden
 int16_t            inx_10sec ;                          // Index in de stat_10sec buffer
-statinfo_t         stat_1min[STATSIZ] ;                 // Status per minuut
+statinfo_t*        stat_1min ;                          // Status per minuut
 int16_t            inx_1min ;                           // Index in de stat_1min buffer
-statinfo_t         stat_1uur[STATSIZ] ;                 // Status per uur
+statinfo_t*        stat_1uur ;                          // Status per uur
 int16_t            inx_1uur ;                           // Index in de stat_1uur buffer
 int                RS485_pin_rx = RS485PINRX ;          // Default pin for RX of RS485 Serial port
 int                RS485_pin_tx = RS485PINTX ;          // Default pin for TX of RS485 Serial port
 int                RS485_pin_de = RS485PINDE ;          // Pin for enabling xmit of MAX485 (config)
 uint8_t            venus_mb_adr = 1 ;                   // Modbus address of Marstek Venus
 bool               simul = false ;                      // True for Modbus simulation
-ModbusMaster*      modbus ;                             // Modbus object
+Vmodbus*           modbus ;                             // Modbus object
 bool               modbusOkay = false ;                 // False if Modbus error seen
 String             ipaddress ;                          // Own IP-address
 AsyncWebServer     cmdserver ( 80 ) ;                   // Instance of embedded webserver, port 80
@@ -165,6 +176,7 @@ TaskHandle_t       xmaintask ;                          // Taskhandle for main t
 TaskHandle_t       xMBtask ;                            // Task handle for lezen/schrijven modbus
 TaskHandle_t       xreadP1task ;                        // Task handle for lezen dongle
 TaskHandle_t       xcontroltask ;                       // Task handle for control of the battery
+TaskHandle_t       xsavetask ;                          // Task handle vor save statistical data
 EventGroupHandle_t taskEvents ;                         // Events for triggering various tasks
 uint16_t           xwificount = 0 ;                     // Loop counter for P1 communication task
 SemaphoreHandle_t  dbgsem = NULL ;                      // For exclusive usage of dbgprint
@@ -212,7 +224,6 @@ uint32_t blue  = 0x000020 ;
 uint32_t white = 0x141414 ;
 uint32_t black = 0x000000 ;
 
-
 // Code voor register type
 enum mb_data_t { u16, s16, u32, s32, undef } ;          // uint16_t, int16_t, uint32_t, int32_t en undefined
 
@@ -246,7 +257,7 @@ RTInfo_t rtdata[] =                                     // Real-time data from V
     { 44002,   u16, "max charge power",    20, 20,  1, 2500 },     // MAXCHG - Max charge power 200..5000W
     { 44003,   u16, "max discharge power", 20, 20,  1,  800 },     // MAXDIS - Max discharge power 200..5000W
     {     0, undef, "Power in",            -1, -1,  1,    0 },     // PWIN   - Power in (P1) (negatief is power uit)
-    { 32102,   s32, "Laadt met",           -1, -1,  1,    0 },     // CURBC  - Huidig vermogen opladen (negatief is ontladen)
+    { 32102,   s32, "Laadt met",            5,  5,  1,    0 },     // CURBC  - Huidig vermogen opladen (negatief is ontladen)
     {     0, undef, "Setpoint",            -1, -1,  1,    0 },     // SETBC  - Setpint laden/ontladen batterij
     {     0, undef, "Fout teller",         -1, -1,  1,    0 },     // ERRCNT - Errorcount
 } ;
@@ -261,17 +272,17 @@ struct controlout_t                                     // Structure of control 
 {
   uint16_t   mb_regnr ;                                 // ModBus registernummer
   char       name[30] ;                                 // Naam van het register
-  int16_t    refr_time ;                                // Aantal seconden te wachten bij refreshen
-  int16_t    refr_time_cnt ;  	                        // Telt seconden tot aan refr_time
+  int16_t    refr_time ;                                // Aantal cycli te wachten bij refreshen
+  int16_t    refr_time_cnt ;  	                        // Telt cycli tot aan refr_time
   int16_t    value ;                                    // Output data
 } ;
 
 controlout_t ctdata[] =                                 // Structure of control output data
 {
-  { 42000, "RS485 Control mode", 900, 900, 0x55AA },    // CM485  - Enable/ disable RS485 control mode
-  { 42010, "Forcible charge",      5,   0,      0 },    // FORCE  - 0 = stop, 1 = charge, 2 = discharge
-  { 42020, "Charge power",         5,   0,      0 },    // COUT   - Forcible charge power
-  { 42021, "DisCharge power",      5,   0,      0 },    // DOUT   - Forcible discharge power
+  { 42000, "RS485 Control mode",  60,  60, MODBUS_ENABLE }, // CM485  - Enable/ disable RS485 control mode
+  { 42010, "Forcible charge",      1,   0,      0        }, // FORCE  - 0 = stop, 1 = charge, 2 = discharge
+  { 42020, "Charge power",         1,   0,      0        }, // COUT   - Forcible charge power
+  { 42021, "DisCharge power",      1,   0,      0        }, // DOUT   - Forcible discharge power
 } ;
 
 #define NUMOREGS ( sizeof(ctdata) / sizeof(ctdata[0]) )
@@ -283,6 +294,8 @@ controlout_t ctdata[] =                                 // Structure of control 
 
 // Supported dongles:
 #include "P1_Dongle_pro.h"          // smart-stuff.nl model
+#include "Homewizard.h"             // Home Wizard model  (UNTESTED)
+#include "Shelly_pro_3.h"           // Shelly Pro 3 energy meter
 #include "P1_simul.h"               // Simulation of a dongle
 
 
@@ -327,55 +340,6 @@ void dbgprint ( const char* format, ... )
   }
   xSemaphoreGive ( dbgsem ) ;                           // Release resource
 }
-
-
-//**************************************************************************************************
-//                                 B E W A A R S T A T S                                           *
-//**************************************************************************************************
-// Bewaar gegevens van de controltask in de statistiekbuffers.                                     *
-//**************************************************************************************************
-void bewaarstats ( uint16_t pIn, uint16_t pOut )
-{
-  static uint32_t tel_1min_pIn  = 0 ;                   // Voor middelen over 1 minuut
-  static uint32_t tel_1min_pOut = 0 ;                   // Voor middelen over 1 minuut
-  static uint32_t tel_1uur_pIn  = 0 ;                   // Voor middelen over 1 uur
-  static uint32_t tel_1uur_pOut = 0 ;                   // Voor middelen over 1 uur
-
-  if ( seconds % 10 == 0 )                              // 10 seconden voorbij?
-  {
-    stat_10sec[inx_10sec].pIn = pIn ;                   // Ja, bewaar gegevens
-    stat_10sec[inx_10sec].pOut = pOut ;
-    tel_1min_pIn += pIn ;                               // Sommeer t.b.v. minuut gemiddelde
-    tel_1uur_pOut += pIn ;                              // Sommeer t.b.v. uur gemiddelde
-    if ( ++inx_10sec == STATSIZ )                       // Update de pointer
-    {
-      inx_10sec = 0 ;
-    }
-  }
-  if ( seconds % 60 == 0 )                              // 1 minuut voorbij?
-  {
-    stat_1min[inx_1min].pIn = tel_1min_pIn / 6 ;        // Ja, bewaar gegevens
-    stat_1min[inx_1min].pOut = tel_1min_pOut / 6 ;
-    tel_1min_pIn = 0 ;                                  // Som weer op 0
-    tel_1min_pOut = 0 ;
-    if ( ++inx_1min == STATSIZ )                        // Update de pointer
-    {
-      inx_1min = 0 ;
-    }
-  }
-  if ( seconds % 3600 == 0 )                            // 1 uur voorbij?
-  {
-    stat_1uur[inx_1uur].pIn = tel_1uur_pIn / 60 ;       // Ja, bewaar gegevens
-    stat_1uur[inx_1uur].pOut = tel_1uur_pOut / 60 ;
-    tel_1uur_pIn = 0 ;                                  // Som weer op 0
-    tel_1uur_pOut = 0 ;
-    if ( ++inx_1uur == STATSIZ )                        // Update de pointer
-    {
-      inx_1uur = 0 ;
-    }
-  }
-}
-
 
 
 //**************************************************************************************************
@@ -567,7 +531,7 @@ const char* buildJSON()
     doc[rtdata[inx].name] = String ( tmp ) ;              // Vul een key/value pair
   }
   doc["Controller tekst"] = controltext ;                 // Vul extra key/value pair
-  doc["Controller mode"] = controlmod ;                   // Ook modus (nom,man,stb)
+  doc["Controller mode"] = controlmod ;                   // Ook modus (nom,man,stb,off)
   doc["Manual setpoint"] = man_setpoint ;                 // En handmatig setpoint
   releaseData() ;
   serializeJsonPretty ( doc, bjbuf, sizeof(bjbuf) ) ;     // Maak er een string van
@@ -725,7 +689,7 @@ void chomp ( String &str )
   str.trim() ;                                        // Remove spaces and CR
 }
 
-
+#ifdef bla
 //**************************************************************************************************
 //                          G E T _ M O D B U S _ E R R S T R                                      *
 //**************************************************************************************************
@@ -753,7 +717,7 @@ const char* get_modbus_errstr ( uint8_t err )
   }
   return resstr ;                                     // Return resulting string
 }
-
+#endif
 
 //**************************************************************************************************
 //                            G E T _ M O D B U S _ D A T A _ R E G S                              *
@@ -771,8 +735,7 @@ bool get_modbus_data_regs()
   uint16_t    regnr ;                                             // Register te lezen
   mb_data_t   dt ;                                                // Type, bijvoorbeeld "s32"
   uint16_t    n ;                                                 // Aantal register te lezen, 1 = 16 bits woord
-  uint16_t    value ;                                             // Gelezen waarde
-  uint32_t    value32 ;                                           // Idem, 32 bits
+  int32_t     value32 ;                                           // Gelezen waarde, 32 bits
   const char* TAG = "get_modbus_data_regs" ;                      // Voor debugging semaphore
   const char* err ;                                               // Modbus error code
 
@@ -801,27 +764,25 @@ bool get_modbus_data_regs()
     //dbgprint ( "Lees %d registers vanaf %d(%s)",
     //           n, regnr, rtdata[i].name ) ;
     claimMb ( TAG ) ;                                             // Access modbus hardware
-    res = modbus->readHoldingRegisters ( regnr, n  ) ;            // Read holdingregister (0x03) from Venus
-    if ( ( modbusOkay = ( res == modbus->ku8MBSuccess ) ) )       // Success?
+    if ( modbus->readHRegisters ( regnr, n  ) )                   // Read holdingregister (0x03) from Venus
     {
-      value = modbus->getResponseBuffer ( 0 ) ;                   // Ja, leest eerste woord
       switch ( dt )
       {
         case u16 :
-          value32 = value ;                                       // Converteer u16 naar float
+          value32 = modbus->getResponse_u16() ;                   // Haal u16 data op
           break ;
         case s16 :
-          value32 = (int16_t)value ;                               // Converteer s16 naar float
+          value32 = modbus->getResponse_s16() ;                   // Haal s16 data op
           break ;
         case s32 :
-          value32 = value << 16 | modbus->getResponseBuffer ( 1 ) ;
+          value32 = modbus->getResponse_s32() ;                   // Haal s32 data op
           break ;
         case u32 :
-          value32 = value << 16 | modbus->getResponseBuffer ( 1 ) ;
+          value32 = modbus->getResponse_u32() ;                   // Haal u32 data op
           break ;
       }
+      delay ( 5 ) ;                                               // Laat anderen toe
       releaseMb() ;                                               // Geef ModBus weer vrij
-      delay ( 20 ) ;                                              // Laat anderen toe
       claimData ( "modbus get" ) ;                                // Exclusieve toegang tot data vragen
       rtdata[i].value = value32 / rtdata[i].A ;                   // Scale and store data
       //dbgprint ( "Register inhoud is %d", rtdata[i].value ) ;
@@ -829,12 +790,10 @@ bool get_modbus_data_regs()
     }
     else
     {
-      err = get_modbus_errstr ( res ) ;                           // ModBus fout, haal de errortekst op
+      delay ( 5 ) ;                                               // Laat anderen toe
       releaseMb() ;                                               // Geef resource weer vrij
-      vTaskDelay ( 0 ) ;                                          // Laat anderen toe
-      dbgprint ( "MB: Fout 0x%02X (%s) "                          // Modbus I/O error
-                 "bij lezen van register %d!",
-                res, err, regnr ) ;
+      dbgprint ( "MB: Fout bij lezen van register %d!",
+                 regnr ) ;
       fres = false ;      	                                      // Set negatief function result
       errorcount++ ;                                              // Count errors
       break ;                                                     // Doorgaan is zinloos
@@ -849,11 +808,10 @@ bool get_modbus_data_regs()
 //**************************************************************************************************
 // Write data registers to modbus.                                                                 *
 // Registers are 2 bytes, big endian.                                                              *
+// De parameter geeft aan of het een timeout was.                                                  *
 //**************************************************************************************************
-bool put_modbus_data_regs()
+bool put_modbus_data_regs ( bool was_timeout )
 {
-  uint8_t     res ;                                               // Result modbus functions
-  bool        fres = true ;                                       // Function result, assume positive
   uint8_t     i ;                                                 // Loop control
   uint16_t    regnr ;                                             // Register te lezen
   uint16_t    value ;                                             // Gelezen waarde
@@ -876,21 +834,17 @@ bool put_modbus_data_regs()
     //dbgprint ( "Schrijf registers %d (%s), inhoud is %d",
     //          regnr, ctdata[i].name, value ) ;
     claimMb ( TAG ) ;                                             // Access modbus hardware
-    res = modbus->writeSingleRegister ( regnr, value  ) ;         // Schrijf holdingregister
-    modbusOkay = ( res == modbus->ku8MBSuccess ) ;                // Success of niet
-    err = get_modbus_errstr ( res ) ;                             // Haal errortekst op
+    modbusOkay = modbus->writeHRegister ( regnr, value  ) ;       // Schrijf holdingregister
+    delay ( 5 ) ;                                                 // Laat anderen toe
     releaseMb() ;                                                 // Geef resource weer vrij
-    vTaskDelay ( 0 ) ;                                            // Laat anderen toe
     if ( ! modbusOkay )                                           // Success?
     {
-      dbgprint ( "MB: Fout 0x%02X (%s) bij schrijven register!",  // Modbus I/O error
-                  res, err ) ;
-      fres = false ;      	                                      // Set negatief function result
+      dbgprint ( "MB: Fout bij schrijven register %d!", regnr) ;  // Modbus I/O error
       errorcount++ ;                                              // Count errors
       break ;                                                     // Doorgaan is zinloos
     }
   }
-  return fres ;                                                   // Return result as a boolean
+  return modbusOkay ;                                             // Return result as a boolean
 }
 
 
@@ -1030,7 +984,7 @@ bool update_software ( const char* lstmodkey,                   // v_firmware or
       if ( line.indexOf ( " 200 " ) < 0 )
       {
         dbgprint ( "Kreeg een niet-200 fout code van de "
-                   "server: %s", line.c_str() ) ;
+                   "server: %s!", line.c_str() ) ;
         return res ;
       }
     }
@@ -1077,10 +1031,11 @@ bool update_software ( const char* lstmodkey,                   // v_firmware or
 //**************************************************************************************************
 bool read_p1_dongle_http()
 {
-  uint32_t    timeout = millis() ;                              // To detect time-out
-  String      line ;                                            // Input header line
-  uint32_t    tmpl ;                                            // Temporary input length
-  int         bread ;                                           // Number of bytes read
+  String               line ;                                   // Input header line
+  uint32_t             tmpl ;                                   // Temporary input length
+  int                  bread ;                                  // Number of bytes read
+  int                  trycount = 4 ;                           // Aantal connect pogingen
+  DeserializationError jsonerr ;
 
   if ( ! NetworkFound )                                         // Hebben we toegang tot netwerk?
   {
@@ -1090,17 +1045,21 @@ bool read_p1_dongle_http()
   //          dongle_host.c_str(),
   //          dongle_port,
   //          dongle_api.c_str() ) ;
-  if ( ! P1_client.connect ( dongle_host.c_str(),               // Connect to dongle
-                             dongle_port, 5000 ) )              // Time-out op 5 seconden
+  while ( ! P1_client.connect ( dongle_host.c_str(),            // connect to dongle
+                                dongle_port, 5000 ) )           // Time-out op 5 seconden
   {
-    dbgprint ( "Verbinden met P1-dongle mislukt!" ) ;
-    return false ;
+    if ( --trycount == 0 )                                      // Genoeg geprobeerd?
+    {
+      dbgprint ( "Verbinden met P1-dongle mislukt!" ) ;         // Ja, geef op
+      return false ;
+    }
   }
-  P1_client.printf ( "GET %s HTTP/1.1\r\n"
+  P1_client.printf ( "GET %s HTTP/1.1\r\n"                      // Gelukt, gebruik API
                     "Host: %s\r\n"
                     "Cache-Control: no-cache\r\n"
                     "Connection: close\r\n\r\n",
                     dongle_api.c_str(), dongle_host ) ;
+  uint32_t  timeout = millis() ;                                // To detect time-out
   while ( P1_client.available() == 0 )                          // Wait until response appears
   {
     if ( millis() - timeout > 5000 )
@@ -1138,27 +1097,38 @@ bool read_p1_dongle_http()
   // End of headers reached
   if ( ( clength > 0 ) && ( clength <= sizeof(json_buf) ) )
   {
-    bread = P1_client.readBytes ( (uint8_t*)json_buf,           // Lees de JSON string
-                                  clength ) ;
+    bread = P1_client.readBytes ( (uint8_t*)json_buf,           // Lees minimaal de JSON string
+                                  sizeof(json_buf) ) ;
     P1_client.stop() ;
     //dbgprint ( "json length is %d", bread ) ;
+
     if ( bread >= clength )
     {
-      if ( deserializeJson ( json_doc, json_buf ) )
+      json_begin = strstr ( json_buf, "{" ) ;                   // Wijs naar begin van de json string
+      if ( json_begin == NULL )
       {
-        dbgprint ( "JSON codering fout!" ) ;
+        dbgprint ( "JSON begint niet met een acculade!" ) ;     // Geen begin gevonden
+        return false ;
+      }
+      jsonerr = deserializeJson ( json_doc, json_begin ) ;      // Decodeer json
+      if ( jsonerr != DeserializationError::Ok )
+      {
+        dbgprint ( "P1 JSON codering fout %d, lengte is %d!",
+                   jsonerr, strlen ( json_begin ) ) ;
         return false ;
       }
       //dbgprint ( "JSON okay" ) ;
     }
     else
     {
+      dbgprint ( "P1 read lengte is %d, verwacht %d!",
+                 bread, clength ) ;
       return false ;
     }
   }
   else
   {
-    dbgprint ( "Onverwachte inhoud van P1 antwoord!" ) ;
+    dbgprint ( "P1 onverwachte inhoud in antwoord!" ) ;
     P1_client.stop() ;
     return false ;
   }
@@ -1176,9 +1146,8 @@ bool read_p1_dongle_http()
 void IRAM_ATTR timer1sec()
 {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE ;
-  uint32_t   bits = MBtaskbit  |                        // Bits die elke seconde worden geset
-                    readP1taskbit ; 
-
+  uint32_t   bits = readP1taskbit | savetaskbit ;       // Events die elke seconde wordt geset
+  
   seconds++  ;                                          // Update seconds counter
   if ( ++timeinf.tm_sec >= 60 )                         // Update number of seconds
   {
@@ -1500,9 +1469,8 @@ String handle_mb_manip ( String argument, String value )
   mb_data_t   dt ;                                      // Datatype van het register
   int16_t     n ;                                       // Aantal woorden te lezen
   const char* TAG = "handle_mb_manip" ;                 // Tag voor debugging semaphores
-  uint8_t     r ;                                       // Resulaat van modbus transactie
-  uint16_t    value16 ;                                 // Gelezen waarde
-  uint32_t    value32 ;                                 // Idem, 32 bits
+  bool        r ;                                       // Resulaat van modbus transactie
+  int32_t     value32 ;                                 // Gelezen waarde, 32 bits
 
   res = String ( "!Error" ) ;                           // Default result
   dbgprint ( "ModBus actie %s[%s]", argument.c_str(),
@@ -1519,25 +1487,22 @@ String handle_mb_manip ( String argument, String value )
     if ( argument.startsWith ( "mbget_" ) )             // Is it Get register?
     {
       claimMb ( TAG ) ;                                 // Access modbus hardware
-      r = modbus->readHoldingRegisters ( p1, n  ) ;     // Read inputregister from Venus
-      if ( r == modbus->ku8MBSuccess )                  // Resultaat goed?
+      r = modbus->readHRegisters ( p1, n  ) ;           // Read inputregister(s) from Venus
+      if ( r )                                          // Resultaat goed?
       {
-        value16 = modbus->getResponseBuffer ( 0 ) ;     // Ja, leest eerste woord
         switch ( dt )
         {
           case u16 :
-            value32 = value16 ;                         // Converteer u16 naar float
+            value32 = modbus->getResponse_u16() ;       // Converteer u16 naar int32
             break ;
           case s16 :
-            value32 = (int16_t)value16 ;                // Converteer s16 naar float
+            value32 = modbus->getResponse_s16() ;       // Converteer s16 naar int32
             break ;
           case s32 :
-            value32 = value16 << 16 |
-                      modbus->getResponseBuffer ( 1 ) ;
+            value32 = modbus->getResponse_s32() ;       // Converteer s32 naar int32
             break ;
           case u32 :
-            value32 = value16 << 16 |
-                      modbus->getResponseBuffer ( 1 ) ;
+            value32 = modbus->getResponse_u32() ;
             break ;
         }
         res = String ( value32 ) ;                      // Converteer naar een string
@@ -1552,8 +1517,8 @@ String handle_mb_manip ( String argument, String value )
         value = value.substring ( cpos + 1 ) ;          // Get second parameter
         p2 = value.toInt() ;                            // Get value, value to be stored
         claimMb ( TAG ) ;                               // Access modbus hardware
-        r = modbus->writeSingleRegister ( p1, p2 ) ;    // Schrijf naar ModBus
-        if ( r == modbus->ku8MBSuccess )                // Resultaat goed?
+        r = modbus->writeHRegister ( p1, p2 ) ;         // Schrijf naar ModBus
+        if ( r )                                        // Resultaat goed?
         {
           res = String ( "Okay" ) ;                     // Good result
         }
@@ -1709,6 +1674,7 @@ const char* analyzeCmd ( const char* par, const char* val )
     dbgprint ( "Stack MBtask      is %4d", uxTaskGetStackHighWaterMark ( xMBtask ) ) ;
     dbgprint ( "Stack readP1task  is %4d", uxTaskGetStackHighWaterMark ( xreadP1task ) ) ;
     dbgprint ( "Stack controltask is %4d", uxTaskGetStackHighWaterMark ( xcontroltask ) ) ;
+    dbgprint ( "Stack savetask    is %4d", uxTaskGetStackHighWaterMark ( xsavetask ) ) ;
     sprintf ( reply,
               "Vrij geheugen is %d, "
               "Stack hoofdprogramma is %4d, "
@@ -1928,6 +1894,38 @@ void handle_getStatus ( AsyncWebServerRequest *request )
 {
   //dbgprint ( "HTTP get status" ) ;                        // Show request
   request->send ( 200, "text/json", buildJSON() ) ;         // Send the reply
+}
+
+
+//**************************************************************************************************
+//                                  H A N D L E _ G E T J S O N                                    *
+//**************************************************************************************************
+// Called from index page to display last json from dongle.                                        *
+//**************************************************************************************************
+void handle_getjson ( AsyncWebServerRequest *request )
+{
+  //dbgprint ( "HTTP get json" ) ;                          // Show request
+  request->send ( 200, "text/json", json_begin ) ;          // Send the reply
+}
+
+
+//**************************************************************************************************
+//                                  H A N D L E _ G E T G R A P H                                  *
+//**************************************************************************************************
+// Called from statistics page to display statistic data.                                          *
+//**************************************************************************************************
+void handle_getgraph ( AsyncWebServerRequest *request )
+{
+  AsyncWebServerResponse *response ;                        // Response on request
+  
+  //dbgprint ( "HTTP get graph" ) ;                         // Show request
+  response = request->beginResponse (                       // Definieer de response
+                        200,                                // Status
+                        "application/octet-stream",
+                        (const uint8_t*)stat_10sec,
+                        sizeof(statinfo_t) * STATSIZ ) ;
+  response->addHeader ( "Index", inx_10sec ) ;              // Current index in array
+  request->send ( response ) ;                              // Stuur de response
 }
 
 
@@ -2181,37 +2179,38 @@ void MBpostTransmission()
 //**************************************************************************************************
 void MBtask ( void * parameter )
 {
+  EventBits_t b ;                                         // Result of xEventGroupWaitBits()
+
   dbgTaskInfo() ;                                         // Toon info
   RS485serial = new HardwareSerial ( 2 ) ;                // Use 2nd serial for RS485 comm.
   RS485serial->begin ( RS485BR, RS485MODE,                // Initialize serial port
                        RS485_pin_rx, RS485_pin_tx ) ;     // RX and TX (cofigurable)
   pinMode ( RS485_pin_de, OUTPUT ) ;                      // Voor sturing lees/schrijf modbus
   MBpostTransmission() ;                                  // Maak ModBus inactief
-  modbus = new ModbusMaster () ;                          // Create modbus object
-  modbus->begin ( venus_mb_adr,                           // Set modbus node ID of Marstek Venus
-                  *RS485serial ) ;                        // Serial to use
+  modbus = new Vmodbus() ;                                // Create modbus object
+  modbus->begin ( *RS485serial ) ;                        // Set modbus serial to use
   modbus->preTransmission ( MBpreTransmission ) ;         // Set callbacks for 485_EN signal
   modbus->postTransmission ( MBpostTransmission ) ;
   while ( true )
   {
-    xEventGroupWaitBits ( taskEvents, MBtaskbit,          // Wacht op trigger
-                          pdTRUE, pdFALSE,  5000 ) ;      // Clear bits on exit, 5 seconds time-out
+    b = xEventGroupWaitBits ( taskEvents, MBtaskbit,      // Wacht op trigger
+                              pdTRUE, pdFALSE,  5000 ) ;  // Clear bits on exit, 5 seconds time-out
     setpixel ( black ) ;                                  // LED even uit
-    if ( get_modbus_data_regs() )                         // Lees de registers
+    if ( put_modbus_data_regs ( b == MBtaskbit ) )        // Schrijf de registers
     {
       setpixel ( green ) ;                                // LED weer aan
-      claimData ( "readMBtask" ) ;
-      rtdata[ERRCNT].value = errorcount ;                 // Neem ook error count over in de data
-      releaseData() ;
     }
     else
     {
       setpixel ( red ) ;
       delay ( 2000 ) ;                                    // Ging fout, vertraag ietwat
     }
-    if ( put_modbus_data_regs() )                         // Schrijf de registers
+    if ( get_modbus_data_regs() )                         // Lees de registers
     {
       setpixel ( green ) ;                                // LED weer aan
+      claimData ( "readMBtask" ) ;
+      rtdata[ERRCNT].value = errorcount ;                 // Neem ook error count over in de data
+      releaseData() ;
     }
     else
     {
@@ -2253,6 +2252,14 @@ void readP1task ( void * parameter )
     {
        p1_res = p1_dongle_pro_handle() ;                      // Ja, haal vermogens
     }
+    else if ( dongle.equalsIgnoreCase ( "Homewizard" ) )      // Nee, is het een Homewizard?
+    {
+       p1_res = homewizard_handle() ;                         // Ja, haal vermogens
+    }
+    else if ( dongle.equalsIgnoreCase ( "Shellypro3" ) )      // Nee, is het een Shelly Pro 3?
+    {
+       p1_res = shellypro3_handle() ;                         // Ja, haal vermogens
+    }
     else
     {
       p1_res = false ;
@@ -2268,7 +2275,7 @@ void readP1task ( void * parameter )
     {
       if ( ++err_row >= 5 )                                   // Nee, gebeurt dat vaak?
       {
-        dbgprint ( "Storing bij uitlezen P1 dongle!" ) ;      // Ja, log dat
+        dbgprint ( "Lange storing bij lezen P1 dongle!" ) ;   // Ja, log dat
         errorcount++ ;                                        // Tel aantal fouten
       }
     }
@@ -2282,10 +2289,87 @@ void readP1task ( void * parameter )
 
 
 //**************************************************************************************************
+//                                     S A V E T A S K                                             *
+//**************************************************************************************************
+// Proces dat de data bewaard voor de satistieken.                                                 *
+// De timing wordt gedaan via een event vanuit de timer, elke seconde.                             *
+//**************************************************************************************************
+void savetask ( void * parameter )
+{
+  const  uint16_t cycletime = 10 ;                          // Cycle tiem in seconden
+  static uint16_t timing = INT16_MAX ;                      // Timer voor 5 seconden
+  static uint32_t tel_1min_pIn  = 0 ;                       // Voor middelen over 1 minuut
+  static uint32_t tel_1min_pOut = 0 ;                       // Voor middelen over 1 minuut
+  static uint32_t tel_1min_soc = 0 ;                        // Voor middelen over 1 minuut
+  static uint32_t tel_1uur_pIn  = 0 ;                       // Voor middelen over 1 uur
+  static uint32_t tel_1uur_pOut = 0 ;                       // Voor middelen over 1 uur
+  static uint32_t tel_1uur_soc = 0 ;                        // Voor middelen over 1 uur
+  static uint32_t myseconds = 0 ;                           // Interne klok
+  uint16_t        pIn, pOut, soc ;                          // Te registreren vermogens
+
+  dbgTaskInfo() ;                                           // Toon info
+  while ( true )
+  {
+    xEventGroupWaitBits ( taskEvents, savetaskbit,          // Wacht op trigger
+                          pdTRUE, pdFALSE, 10000 ) ;        // Clear bits on exit, 10 seconds time-out
+    if ( ++timing < cycletime )                             // Tijd voor actie?
+    {
+      continue ;                                            // Nee, uitstellen
+    }
+    if ( stat_1uur == NULL )                                // Ruimte geallocceerd?
+    {
+      continue ;
+    }
+    timing = 0 ;                                            // Ja, reset timer
+    myseconds += cycletime ;                                // Interne klok bijhouden
+    claimData ( "savetask" ) ;
+    pIn = rtdata[PWIN].value + 32768 ;                      // Gemeten (P1) netto vermogen
+    pOut = ctdata[DOUT].value + ctdata[COUT].value  ;       // Uitgestuurde vermogen
+    pOut += 32768 ;
+    soc = rtdata[SOC].value ;                               // Batterij lading in procent
+    stat_10sec[inx_10sec].pIn = pIn ;                       // Ja, bewaar gegevens in stat_10sec
+    stat_10sec[inx_10sec].pOut = pOut ;
+    stat_10sec[inx_10sec].soc = soc ;                       // Lading van de batterij in procent
+    tel_1min_pIn += pIn ;                                   // Sommeer t.b.v. minuut gemiddelde
+    tel_1uur_pOut += pOut ;                                 // Sommeer t.b.v. uur gemiddelde
+    tel_1uur_soc += soc ;                                   // Sommeer t.b.v. uur gemiddelde
+    if ( ++inx_10sec == STATSIZ )                           // Update de pointer
+    {
+      inx_10sec = 0 ;
+    }
+    if ( myseconds % 60 == 0 )                              // 1 minuut voorbij?
+    {
+      stat_1min[inx_1min].pIn = tel_1min_pIn / 6 ;          // Ja, bewaar gegevens
+      stat_1min[inx_1min].pOut = tel_1min_pOut / 6 ;
+      tel_1min_pIn = 0 ;                                    // Som weer op 0
+      tel_1min_pOut = 0 ;
+      if ( ++inx_1min == STATSIZ )                          // Update de pointer
+      {
+        inx_1min = 0 ;
+      }
+    }
+    if ( myseconds % 3600 == 0 )                            // 1 uur voorbij?
+    {
+      stat_1uur[inx_1uur].pIn = tel_1uur_pIn / 60 ;         // Ja, bewaar gegevens
+      stat_1uur[inx_1uur].pOut = tel_1uur_pOut / 60 ;
+      tel_1uur_pIn = 0 ;                                    // Som weer op 0
+      tel_1uur_pOut = 0 ;
+      if ( ++inx_1uur == STATSIZ )                          // Update de pointer
+      {
+        inx_1uur = 0 ;
+      }
+    }
+    releaseData() ;                                         // Geef datagebied weer vrij
+  }
+}
+
+
+//**************************************************************************************************
 //                                     C O N T R O L T A S K                                       *
 //**************************************************************************************************
 // Proces dat doorlopend de sturing voor de batterij berekent en uitstuurt.                        *
 // De timing wordt gedaan via een event vanuit de P1 lees taak, ongeveer elke 5 seconden.          *
+// Als dat niet gebeurt binnen 20 seconden, dan wordt stand-by geactiveerd.                        *
 //**************************************************************************************************
 void controltask ( void * parameter )
 {
@@ -2293,18 +2377,22 @@ void controltask ( void * parameter )
   int16_t        pOut_old ;                                 // Huidig uitgestuurde vermogen
   int16_t        pOut ;                                     // Berekende uitsturing, + is discharge
   bool           stop ;                                     // True als batterij te vol of te leeg is
+  EventBits_t    res ;                                      // Resutaat xEventGroupWaitBits
+  bool           tasktimeout ;                              // True indien er geen startevent was
 
   dbgTaskInfo() ;                                           // Toon info
   while ( true )
   {
-    xEventGroupWaitBits ( taskEvents, controltaskbit,       // Wacht op trigger
-                          pdTRUE, pdFALSE,  20000 ) ;       // Clear bits on exit, 20 seconds time-out
+    res = xEventGroupWaitBits ( taskEvents, controltaskbit, // Wacht op trigger
+                                pdTRUE, pdFALSE,  20000 ) ; // Clear bits on exit, 20 seconds time-out
+    tasktimeout = ( res & controltaskbit ) == 0 ;           // Was er sprake van time-out?
     stop = false ;                                          // Neem aan dat er geen reden om te stoppen is
     claimData ( "controltask" ) ;                           // Bevries data gebied
     pOut_old = rtdata[SETBC].value ;                        // Huidige setting
     pIn = rtdata[PWIN].value ;                              // Haal huidige input van grid
     pOut = pIn + pOut_old ;                                 // Benodigde ontlaad capaciteit (indien positief)
     pOut = ( pOut_old + pOut * 2 ) / 3 ;                    // Beetje filteren
+    ctdata[CM485].value = MODBUS_ENABLE ;                   // Neem aan dat RS485 sturing mag
     // Kijk of er handmatige setting is.
     if ( strstr ( controlmod, "stb" ) )                     // Manual stand-by?
     {
@@ -2313,6 +2401,11 @@ void controltask ( void * parameter )
     else if ( strstr ( controlmod, "man" ) )                // Manual setting?
     {
       pOut = man_setpoint ;                                 // Ja, gebruik die setting
+    }
+    else if ( strstr ( controlmod, "off" ) )                // Modbus mode uit?
+    {
+      pOut = 0 ;                                            // Ja, niet meer sturen
+      ctdata[CM485].value = MODBUS_DISABLE ;                // En RS485 control uitzetten
     }
     // Indien we aan het ontladen zijn en de batterij is al bijna leeg, dan stoppen we ermee.
     // Ook als we aan het laden zijn en de batterij is al bijna vol.
@@ -2324,6 +2417,12 @@ void controltask ( void * parameter )
                 "voor energie bijdrage (%dW)",
                 rtdata[SOC].value, pOut ) ;
       stop = true ;                                         // Ja, dus stoppen
+    }
+    if ( ( ! stop ) && ( tasktimeout ) )                    // Time-out bij startevent?
+    {
+      sprintf ( controltext,
+                "Stand-by ten gevolge van storing P1 dongle" ) ;
+      stop = true ;                                         // Dus stoopen
     }
     if ( ( pOut < 0 ) &&                                    // Laden
          ( rtdata[SOC].value >= rtdata[CHGCC].value ) )     // en vol?
@@ -2388,14 +2487,8 @@ void controltask ( void * parameter )
     if ( pOut != pOut_old )                                 // Verschil t.o.v. vorige setting?
     {
       xEventGroupSetBits ( taskEvents, MBtaskbit ) ;        // Ja, versnel MBtask
-      dbgprint ( "CM485 is %X, DOUT is %d, "
-                 "COUT is %d, FORCE is %d",
-                 ctdata[CM485].value,
-                 ctdata[DOUT].value,
-                 ctdata[COUT].value,
-                 ctdata[FORCE].value ) ;
+      dbgprint ( controltext ) ;
     }
-    bewaarstats ( pIn, pOut ) ;                             // Bewaar gegevens in statistiek buffers
   }
 }
 
@@ -2437,6 +2530,13 @@ void setup()
   {
     psb = ESP.getPsramSize() ;                              // Haal hoeveelheid psram op (ex logregels)
     dbglines = (logregel_t*)ps_malloc(sizeof(logregel_t)) ; // Maak ruimte voor logregels in psram
+    uint16_t nbytes = sizeof(statinfo_t) * STATSIZ ;        // Size of statistic buffer
+    stat_10sec = (statinfo_t*)ps_malloc ( nbytes ) ;        // Allocate the buffers for statistic data
+    stat_1min  = (statinfo_t*)ps_malloc ( nbytes ) ;
+    stat_1uur  = (statinfo_t*)ps_malloc ( nbytes ) ;
+    memset ( stat_10sec, 0, nbytes ) ;                      // Clear 10 seconds buffer
+    memset ( stat_1min,  0, nbytes ) ;                      // Clear 1 minuut buffer
+    memset ( stat_1uur,  0, nbytes ) ;                      // Clear 1 uur buffer
   }
   dbgprint ( "Start " NAME ", version %s",                  // Show start-up info
              VERSION ) ;
@@ -2515,7 +2615,8 @@ void setup()
             MAC2STR ( mac ) ) ;
   dbgprint ( "ESP32 mac address is %s", macstr ) ;        // Show mac address
   sprintf ( netname, "Venus_%02X%02X",                    // Create AP net name, like "Venus_67AB"
-                     mac[5], mac[4] + mac[0] ) ;
+                     mac[5],
+                     ( mac[4] + mac[0] ) & 0xFF) ;
   NetworkFound = connectwifi() ;                          // Connect to WiFi network
   if ( NetworkFound )                                     // Is er een netwerk?
   {
@@ -2533,9 +2634,11 @@ void setup()
   cmdserver.on ( "/saveprefs",    handle_saveprefs ) ;    // Handle save preferences
   cmdserver.on ( "/savemode",     handle_savemode ) ;     // Handle save manual settings
   cmdserver.on ( "/getstatus",    handle_getStatus ) ;    // Handle get status
+  cmdserver.on ( "/getgraph",     handle_getgraph ) ;     // Handle get statistic graphs
   cmdserver.on ( "/logging",      handle_logging ) ;      // Handle logging
   cmdserver.on ( "/reset",        handle_reset ) ;        // Handle reset button
   cmdserver.on ( "/update",       handle_update ) ;       // Handle update software button
+  cmdserver.on ( "/getjson",      handle_getjson ) ;      // Voor teste json
   cmdserver.onNotFound ( handleFileRead ) ;               // Just handle a simple page/file
   cmdserver.begin() ;                                     // Start http server
   MDNS.addService ( "http", "tcp", 80 ) ;                 // Add webinterface service
@@ -2562,14 +2665,22 @@ void setup()
       &xreadP1task,                                       // Task handle to keep track of created task
       1 ) ;                                               // Run on CPU 1
     xTaskCreatePinnedToCore (
-      controltask,                                        // Task to conttrool the battery.
+      controltask,                                        // Task to control the battery.
       "controltask",                                      // Name of task.
       3000,                                               // Stack size of task
       NULL,                                               // parameter of the task
       2,                                                  // priority of the task
       &xcontroltask,                                      // Task handle to keep track of created task
       0 ) ;                                               // Run on CPU 0
-  }
+    xTaskCreatePinnedToCore (
+      savetask,                                           // Task to save statistcal data
+      "savetask",                                         // Name of task.
+      2000,                                               // Stack size of task
+      NULL,                                               // parameter of the task
+      2,                                                  // priority of the task
+      &xsavetask,                                         // Task handle to keep track of created task
+      0 ) ;                                               // Run on CPU 0
+    }
   delay ( 1000 ) ;                                        // 
   dbgprint ( "Einde setup") ;
 }
