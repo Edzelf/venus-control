@@ -24,55 +24,155 @@
   <tr>
    <td bgcolor="#c9ced6"><canvas id="canvas-chart"></canvas></td>
   </tr>
+  <tr>
+    <td>
+     <input type="radio" id="k1" name="gt" value="10sec" onclick="radioclick('10sec')">
+     <label for="k1">Registratie per 10 seconden</label><br>
+     <input type="radio" id="k2" name="gt" value="1min" onclick="radioclick('1min')">
+     <label for="k2">Registratie per 1 minuut</label><br>
+     <input type="radio" id="k3" name="gt" value="1uur" onclick="radioclick('1uur')">
+     <label for="k3">Registratie per 1 uur</label><br>
+    </td>
+  </tr>
  </table>
  <br><br>
- <input type="text" id="statstr" size="80" >
+ <!-- <input type="text" id="statstr" size="80" > -->
 </center>
 
 <script>
 
-  function onloadfunc()
+var t = "10sec" ;                                               // Type grafiek 10sec, 1min of 1uur
+var refrIntv = 20000 ;                                          // Refresh interval
+var graphTitle ;                                                // Titel boven in grafiek
+var xscaletext = "Tijdstip (sec)";                              // Tekst bij x-as
+var xscale = 10 ;                                               // Schaal unit 1 of 10
+
+function radioclick(a)
+{
+  t = a ;                                                       // Bewaar de geselecteerde grafiek
+  checkRadio() ;                                                // Zet diverse variablelen
+  myRefresh() ;
+}
+
+
+function checkRadio()
+{
+  if ( ( k1.checked || k2.checked || k3.checked ) == false )
   {
-    var ctx = document.getElementById ( 'canvas-chart' ).getContext ( '2d' ) ;
-    window.myLine = new Chart ( ctx, chconfig ) ;
-    // Request for current graph data
-    var theUrl = "/getgraph?version=" + Math.random() ;
-    var xhr = new XMLHttpRequest() ;
-    var i ;                                             // Index in struct statinfo_t
-    var j ;                                             // Index in int16_t array
-    var pIn, pOut, soc ;                                // Variabelen uit array
-    xhr.onreadystatechange = function() {
-      if ( xhr.readyState == XMLHttpRequest.DONE )
+    k1.checked = true ;
+  }
+  if ( k1.checked )
+  {
+    t = "10sec" ;                                       // Set graph type naar 10sec
+    xscaletext = "Tijdstip (sec)";                      // Tekst bij x-as
+    xscale = 10 ;                                       // Schaal unit 1
+    refrIntv = 20000 ;                                  // En pas refresh tijd aan
+    graphTitle = "Venus regeling laatste 16 minuten" ;  // Pas titel aan
+
+  }
+  if ( k2.checked )
+  {
+    t = "1min" ;                                        // Set graph type naar 1 minuut
+    xscaletext = "Tijdstip (min)";                      // Tekst bij x-as
+    xscale = 1 ;                                        // Schaal unit 1
+    refrIntv = 60000 ;                                  // En pas refresh tijd aan
+    graphTitle = "Venus regeling laatste 100 minuten" ; // Pas titel aan
+  }
+  if ( k3.checked )
+  {
+    t = "1uur" ;                                        // Set graph type naar 1 uur
+    xscaletext = "Tijdstip (uur)";                      // Tekst bij x-as
+    xscale = 1 ;                                        // Schaal unit 1
+    refrIntv = 3600000 ;                                // En pas refresh tijd aan
+    graphTitle = "Venus regeling laatste 4 dagen" ;     // Pas titel aan
+  }
+}
+
+function myRefresh()
+{
+  chconfig.options.title.text = graphTitle ;                              // Zet juiste titel in grafiek
+  chconfig.options.scales.xAxes[0].scaleLabel.labelString = xscaletext ;  // Zet juiste tekst bij x-as
+  // Request for current graph data
+  var theUrl = "/getgraph?t=" + t + "&version=" + Math.random() ;
+  var xhr = new XMLHttpRequest() ;
+  while ( chconfig.data.datasets[0].data.length )
+  {
+    chconfig.data.datasets[0].data.pop() ;
+    chconfig.data.datasets[1].data.pop() ;
+    chconfig.data.datasets[2].data.pop() ;
+    chconfig.data.labels.pop() ;
+  }
+  xhr.onreadystatechange = function() {
+    if ( xhr.readyState == XMLHttpRequest.DONE )
+    {
+      var b64invs = [ 62, -1, -1, -1, 63, 52, 53, 54, 55, 56, 57, 58,
+                      59, 60, 61, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4, 5,
+                      6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                      21, 22, 23, 24, 25, -1, -1, -1, -1, -1, -1, 26, 27, 28,
+                      29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
+                      43, 44, 45, 46, 47, 48, 49, 50, 51 ] ;
+      const STATSIZ = 100 ;                                   // Aantal datapunten
+      var inx ;                                               // Index in array van metingen
+      var ib ;                                                 // Index in base64 string
+      var pIn, pOut, soc ;                                    // Variabelen uit array
+      var b0, b1, b2, b3, b4, b5 ;
+      const input = xhr.responseText ;
+      inx = xhr.getResponseHeader ( "Index" ) ;               // Haal waarde van header "Index"
+      ib = inx * 8 ;                                          // 8 characters per meting
+      ib = ib & 0xFFF8 ;                                      // Rare bug corrigeren
+      for ( let k = 0 ; k < STATSIZ ; k++ )                   // Ga alle punten langs
       {
-        const STATSIZ = 100 ;                           // Aantal datapunten
-        const buf = xhr.response ;
-        i = xhr.getResponseHeader ( "Index" ) ;
-        for ( let k = 0 ; k < STATSIZ ; k++ )           // Ga alle punten langs
+        // We verwachten van Javascript geen 64 bits precisie, dus 48 bits verdelen over 2 variabelen.
+        let vh = 0 ;                                          // Zal bits 24-47 bevatten
+        let vl = 0 ;                                          // Zal bits 0-23 bevatten
+        for ( let j = 0 ; j < 8 ; j++ )                       // Haal 48 bits (3 16 bit integers op)
         {
-          j = i * 6 ;                                   // Index in byte array
-          let x0 = buf.charCodeAt ( j++ ) & 0xFF ;      // Haal bytes uit het array
-          let x1 = buf.charCodeAt ( j++ ) & 0xFF ;
-          let x2 = buf.charCodeAt ( j++ ) & 0xFF ;
-          let x3 = buf.charCodeAt ( j++ ) & 0xFF ;
-          let x4 = buf.charCodeAt ( j++ ) & 0xFF ;
-          if ( x4 != 0 )
+          let b6 =  b64invs[input.charCodeAt ( ib++ ) - 43] ;
+          if ( j < 4 )                                        // H.O. deel?
           {
-            pIn  = ( x0 | ( x1 << 8 ) ) - 0x8000 ;      // Bepaaal pIn
-            pOut = ( x2 | ( x3 << 8 ) ) - 0x8000 ;      // Bepaal pOut
-            soc  = x4 ;                                 // Bepaal soc
-            var lab = ( k - STATSIZ ) * 10 ;            // Seconden als label
-            AddNewData ( pIn, -pOut, soc, lab ) ;       // Zet in grafiek
+            vh = ( vh << 6 ) | b6 ;
           }
-          if ( ++i >= STATSIZ )                         // Volgende punt.  Einde bereikt
+          else
           {
-            i = 0 ;                                     // Ja, round robin
+            vl = ( vl << 6 ) | b6 ;
           }
         }
+        if ( ib >= ( STATSIZ * 8 ) )
+        {
+          ib = 0 ;
+        }
+        b0 = ( vh >> 16 ) & 0xFF ;                            // Pak 8 bits unsigned byte
+        b1 = ( vh >>  8 ) & 0xFF ;
+        b2 = ( vh       ) & 0xFF ;
+        b3 = ( vl >> 16 ) & 0xFF ;
+        b4 = ( vl >>  8 ) & 0xFF ;
+        b5 = ( vl       ) & 0xFF ;
+        pIn  = ( b1 << 8 ) | b0 ;                             // Vorm 1e 16 bits unsigned word
+        if ( pIn > 32768 ) pIn -= 65536 ;                     // Correctie voor negatieve getallen
+        pOut = ( b3 << 8 ) | b2 ;                             // Vorm 2e 16 bits unsigned word
+        if ( pOut > 32768 ) pOut -= 65536 ;                   // Correctie voor negatieve getallen
+        soc  = b4 ;                                           // Pak laatste 8 bits byte
+        var lab = ( k - STATSIZ ) * xscale ;                  // label per 1 of 10 metingen
+        if ( soc != 0 )                                       // soc is nul bij ongemeten punten; overslaan
+        {
+          AddNewData ( pIn, -pOut, soc, lab ) ;               // Zet in grafiek
+        }
       }
+      myLineChart.update() ;
     }
+  }
+  try
+  {
     xhr.open ( "GET", theUrl, false ) ;
     xhr.send() ;
   }
+  catch ( e )
+  {
+    console.log ( "Error: " + e ) ; 
+  }
+  setInterval ( myRefresh, refrIntv ) ;
+}
+
 
   function AddNewData ( pIn, pOut, soc, lab )
   {
@@ -80,7 +180,6 @@
    chconfig.data.datasets[0].data.push ( pIn ) ;
    chconfig.data.datasets[1].data.push ( pOut ) ;
    chconfig.data.datasets[2].data.push ( soc ) ;
-   window.myLine.update() ;
   }
 
 
@@ -91,21 +190,24 @@ var chconfig = {
     data: {
       labels: [],
       datasets: [{
-        label: 'Netto verbruik',
+        label: 'Netto verbruik[W]',
+        id: 'Verm',
         backgroundColor: "#3e95cd",
         borderColor: "#3e95cd",
         data: [],
         fill: false,
       },
       {
-       label: 'Batterij',
+       label: 'Batterij[W]',
+       yAxisID: 'Verm',
        backgroundColor: "#373737",
        borderColor: "#373737",
        data: [],
        fill: false,
       },
       {
-        label: 'Lading',
+        label: 'Lading[%]',
+        yAxisID: 'Lad',
         backgroundColor: "#D13537",
         borderColor: "#D13537",
         data: [],
@@ -117,7 +219,7 @@ var chconfig = {
       responsive: true,
       title: {
         display: true,
-        text: 'Venus regeling'
+        text: 'Venus regeling laatste .. minuten'
       },
       tooltips: {
         mode: 'index',
@@ -132,11 +234,12 @@ var chconfig = {
           display: true,
           scaleLabel: {
             display: true,
-            labelString: 'Tijdstip'
+            labelString: 'Tijdstip[sec]'
           }
         }],
         yAxes: [{
           display: true,
+          id: 'Verm',
           ticks: { suggestedMin: 0, suggestedMax: 800 },
           scaleLabel: {
             display: true,
@@ -145,6 +248,8 @@ var chconfig = {
         },
         {
           display: true,
+          id: 'Lad',
+          position: 'right',
           ticks: { suggestedMin: 0, suggestedMax: 100 },
           scaleLabel: {
             display: true,
@@ -154,7 +259,11 @@ var chconfig = {
       }
     }
   } ;
-onloadfunc() ;
+
+checkRadio() ;
+var ctx = document.getElementById ( 'canvas-chart' ).getContext ( '2d' ) ;
+var myLineChart = new Chart ( ctx, chconfig ) ;
+myRefresh() ;
 </script>
 </body>
 </html>
