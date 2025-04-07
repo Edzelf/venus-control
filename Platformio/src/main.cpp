@@ -30,8 +30,11 @@
 // 27-03-2025, ES: Driver voor Shelly Pro 3 energy meter.                                           *
 // 28-03-2025, ES: Grotere buffer voor JSON van P1 dongle, correctie ModBus enable.                 *
 // 30-03-2025, ES: Correctie inlezen P1 i.v.m. rare header in JSON bij Homewizard.                  *
+// 04-04-2025, ES: Grafieken pagina voor web-interface, minimale charge/discharge.                  *
+// 05-04-2025, ES: No reset on web-interface refresh.                                               *
+// 07-04-2025, ES: Correctie grafieken.                                                             *
 //***************************************************************************************************
-#define VERSION     "Mon, 31 Mar 2025 17:40:00 GMT"       // Current version
+#define VERSION     "Mon, 07 Apr 2025 09:00:00 GMT"       // Current version
 
 #include <Arduino.h>
 #include <soc/soc.h>                    // For brown-out detector setting
@@ -54,6 +57,7 @@
 #include <vector>
 #include <ArduinoJson.h>                                  // JSON library
 #include <Adafruit_NeoPixel.h>                            // Voor de neopixel op pin 21
+#include <base64.h>
 #include "Vmodbus.h"                                      // ModBus driver
 #include "config.h"                                       // Configuratie definities
 
@@ -122,8 +126,8 @@ struct WifiInfo_t                               // For list with WiFi info
 
 struct statinfo_t                               // Statistiekbuffer, round robin
 {
-  uint16_t pIn ;                                // Netto energie in Watts + 32768
-  uint16_t pOut ;                               // Laad/ontlaad setting + 32768
+  int16_t pIn ;                                 // Netto energie in Watts + 32768
+  int16_t pOut ;                                // Laad/ontlaad setting + 32768
   uint8_t soc ;                                 // Percentage opgeladen
 } ;
 
@@ -164,6 +168,7 @@ String             dongle ;                             // Type (naam) P1-dongle
 String             dongle_host ;                        // Hostnaam of IP-adres van P1-dongle
 u_int16_t          dongle_port = 80 ;                   // TCP Port voor de api, default 80
 String             dongle_api ;                         // Adres van de api
+uint16_t           minCharge = 100 ;                    // Minimale laad/ontlaad vermogen
 bool               P1_host_connected = false ;          // Connection to host is okay
 bool               P1_host_error = false ;              // Connection to host in error
 uint16_t           P1_ackcount ;                        // Number of acks from host
@@ -194,7 +199,6 @@ bool               cmd_req = false ;                    // Commando staat klaar 
 bool               resetreq = false ;                   // Request to reset the ESP32
 bool               updatefirmware = false ;             // OTA update firmware requested
 bool               updatewebintf = false ;              // OTA update SPIFFS (webinterface) requested
-uint32_t           clength ;                            // Content length found in http header
 String             IPstr ;                              // Text with IP address for
 uint16_t           errorcount = 0 ;                     // Total errors detected
 bool               WiFi_connected = false ;             // WiFi connected or not
@@ -689,35 +693,6 @@ void chomp ( String &str )
   str.trim() ;                                        // Remove spaces and CR
 }
 
-#ifdef bla
-//**************************************************************************************************
-//                          G E T _ M O D B U S _ E R R S T R                                      *
-//**************************************************************************************************
-// Translate some ModBus error codes to text.                                                      *
-//**************************************************************************************************
-const char* get_modbus_errstr ( uint8_t err )
-{
-  const char* resstr = "?" ;                          // Assume unknowk code
-
-  if ( err == modbus->ku8MBInvalidSlaveID )           // Invalid slave ID?
-  {
-    resstr = "InvalidSlaveID" ;
-  }
-  else if ( err == modbus->ku8MBResponseTimedOut )    // Response time-out?
-  {
-    resstr = "ResponseTimedOut" ;
-  }
-  else if ( err == modbus->ku8MBInvalidCRC )
-  {
-    resstr = "InvalidCRC" ;
-  }
-  else if ( err == modbus->ku8MBIllegalDataValue )
-  {
-    resstr = "IllegalDataValue" ;
-  }
-  return resstr ;                                     // Return resulting string
-}
-#endif
 
 //**************************************************************************************************
 //                            G E T _ M O D B U S _ D A T A _ R E G S                              *
@@ -944,6 +919,7 @@ bool update_software ( const char* lstmodkey,                   // v_firmware or
   String      newlstmod ;                                       // Last modified from host
   bool        res = false ;                                     // Result of download
   uint32_t    tmpl ;                                            // Temporary content length
+  uint32_t    updlen ;                                          // Contentlength
   
   otastart() ;                                                  // Show something on screen
   lstmod = nvsgetstr ( lstmodkey ) ;                            // Get current last modified timestamp
@@ -990,7 +966,7 @@ bool update_software ( const char* lstmodkey,                   // v_firmware or
     }
     if ( ( tmpl = scan_content_length ( line.c_str() ) ) )      // Scan for content_length
     {
-      clength = tmpl ;                                          // Found length
+      updlen = tmpl ;                                           // Found length
     }
     if ( line.startsWith ( "Last-Modified: " ) )                // Timestamp of binary file
     {
@@ -1005,9 +981,9 @@ bool update_software ( const char* lstmodkey,                   // v_firmware or
     otaclient.stop() ;
     return res ;    
   }
-  if ( clength > 0 )
+  if ( updlen > 0 )
   {
-    if ( do_software_update ( clength, command ) )              // Flash updated sketch
+    if ( do_software_update ( updlen, command ) )               // Flash updated sketch
     {
       nvssetstr ( lstmodkey, newlstmod ) ;                      // Update Last Modified (version) in NVS
       res = true ;
@@ -1032,7 +1008,8 @@ bool update_software ( const char* lstmodkey,                   // v_firmware or
 bool read_p1_dongle_http()
 {
   String               line ;                                   // Input header line
-  uint32_t             tmpl ;                                   // Temporary input length
+  uint32_t             tmpl ;                                   // Mogelijke input lengte
+  uint32_t             jlen = 0 ;                               // Input length
   int                  bread ;                                  // Number of bytes read
   int                  trycount = 4 ;                           // Aantal connect pogingen
   DeserializationError jsonerr ;
@@ -1084,25 +1061,24 @@ bool read_p1_dongle_http()
     {
       if ( line.indexOf ( " 200 " ) < 0 )
       {
-        dbgprint ( "Kreeg een non-200 status terug van de api!" ) ;
+        dbgprint ( "P1, kreeg een non-200 status terug van de api!" ) ;
         P1_client.stop() ;
         return false ;
       }
     }
     if ( ( tmpl = scan_content_length ( line.c_str() ) ) )      // Scan for content_length
     {
-      clength = tmpl ;                                          // Found length
+      jlen = tmpl ;                                            // Found length
     }
   }
   // End of headers reached
-  if ( ( clength > 0 ) && ( clength <= sizeof(json_buf) ) )
+  if ( ( jlen > 0 ) && ( jlen <= sizeof(json_buf) ) )
   {
     bread = P1_client.readBytes ( (uint8_t*)json_buf,           // Lees minimaal de JSON string
                                   sizeof(json_buf) ) ;
     P1_client.stop() ;
     //dbgprint ( "json length is %d", bread ) ;
-
-    if ( bread >= clength )
+    if ( bread >= jlen )
     {
       json_begin = strstr ( json_buf, "{" ) ;                   // Wijs naar begin van de json string
       if ( json_begin == NULL )
@@ -1122,7 +1098,7 @@ bool read_p1_dongle_http()
     else
     {
       dbgprint ( "P1 read lengte is %d, verwacht %d!",
-                 bread, clength ) ;
+                 bread, jlen ) ;
       return false ;
     }
   }
@@ -1581,6 +1557,7 @@ const char* analyzeCmd ( const char* str )
 //   rs485_pin_de                 // DE pin used for serial communication with RS485 bus.          * 
 //   mbget_xxx                    // Get Modbus real-time register. Example: mbget_u32=2202        *
 //   mbset_xxx                    // Set Modbus R/W register. Example: mbset_u32=41200,0           *
+//   mincharge                    // Minimale laad/ontlaad vermogen, default 100W.                 *
 //**************************************************************************************************
 const char* analyzeCmd ( const char* par, const char* val )
 {
@@ -1663,6 +1640,13 @@ const char* analyzeCmd ( const char* par, const char* val )
   else if ( argument == "simul" )                     // Modbus simulation?
   {
     simul = ( ivalue == 1 ) ;                         // Yes, set oaccordingly
+  }
+  else if ( argument == "mincharge" )                 // Minimaal laad/ontlaad vermogen?
+  {
+    if ( ivalue > 25 )                                // Ja, niet al te gek?
+    {
+      minCharge = ivalue ;                            // Redelijke waarde overnemen
+    }
   }
   else if ( argument == "test" )                      // Test command
   {
@@ -1917,14 +1901,39 @@ void handle_getjson ( AsyncWebServerRequest *request )
 void handle_getgraph ( AsyncWebServerRequest *request )
 {
   AsyncWebServerResponse *response ;                        // Response on request
-  
-  //dbgprint ( "HTTP get graph" ) ;                         // Show request
+  int                    encodedlength ;                    // Lengte van ge codeerde string
+  uint16_t               statslen ;                         // Lengte van de te versturen data
+  String                 encoded ;                          // Result base64 encode
+  base64                 b64c ;                             // Base64 object
+  String                 graphName ;                        // Naam van de gewenste grafiek
+  const uint8_t*         graph ;                            // Wijs naar 1 van de 3 grafieken
+  int                    inx ;                              // Index in één van de 3 grafieken
+
+  graphName =request->arg ( "t" ) ;                         // Welke grafiek is gewenst?
+  //dbgprint ( "HTTP get graph %s", graphName.c_str() ) ;   // Show request
+  if ( graphName == "1min" )                                // 100 x 1 minuut?
+  {
+    graph = (const uint8_t*)stat_1min ;                     // Ja
+    inx = inx_1min ;
+  }
+  else if ( graphName == "1uur" )                           // 100 x 1 uur?
+  {
+    graph = (const uint8_t*)stat_1uur ;                     // Ja
+    inx = inx_1uur ;
+  }
+  else                                                      // Anders 100 x 10 sec
+  {
+    graph = (const uint8_t*)stat_10sec ;
+    inx = inx_10sec ;
+  }
+  statslen = sizeof(statinfo_t) * STATSIZ ;                 // Lengte van de te versturen data
+  encoded = b64c.encode ( graph,                            // Encode de data
+                          statslen ) ;
   response = request->beginResponse (                       // Definieer de response
                         200,                                // Status
-                        "application/octet-stream",
-                        (const uint8_t*)stat_10sec,
-                        sizeof(statinfo_t) * STATSIZ ) ;
-  response->addHeader ( "Index", inx_10sec ) ;              // Current index in array
+                        "text/plain",
+                        encoded ) ;
+  response->addHeader ( "Index", inx ) ;                    // Current index in array
   request->send ( response ) ;                              // Stuur de response
 }
 
@@ -2004,19 +2013,20 @@ void handle_savemode ( AsyncWebServerRequest *request )
 //**************************************************************************************************
 void handle_update ( AsyncWebServerRequest *request )
 {
-  String             reply = "Update request accepted" ;  // Default reply
+  const char*        reply = "Update request accepted" ;  // Default reply
   const int          parnr = 0 ;                          // Eerste parameter is interessant
   
-  dbgprint ( "HTTP update pagina" ) ;                     // Show request
   if ( request->params() > 0 )                            // Parameter aanwezig?
   {
     if ( request->arg ( parnr ) == "w" )                  // Webinterface update?
     {
       updatewebintf = true ;                              // Yes, set request
+      dbgprint ( "HTTP update web-interface" ) ;          // Show request
     }
     else
     {
       updatefirmware = true ;                             // No, set firmware update request
+      dbgprint ( "HTTP update firmware" ) ;               // Show request
     }
   }
   request->send ( 200, "text/plain", reply ) ;            // Send the reply
@@ -2296,16 +2306,17 @@ void readP1task ( void * parameter )
 //**************************************************************************************************
 void savetask ( void * parameter )
 {
-  const  uint16_t cycletime = 10 ;                          // Cycle tiem in seconden
+  const  uint16_t cycletime = 10 ;                          // Cycle time in seconden
   static uint16_t timing = INT16_MAX ;                      // Timer voor 5 seconden
-  static uint32_t tel_1min_pIn  = 0 ;                       // Voor middelen over 1 minuut
-  static uint32_t tel_1min_pOut = 0 ;                       // Voor middelen over 1 minuut
-  static uint32_t tel_1min_soc = 0 ;                        // Voor middelen over 1 minuut
-  static uint32_t tel_1uur_pIn  = 0 ;                       // Voor middelen over 1 uur
-  static uint32_t tel_1uur_pOut = 0 ;                       // Voor middelen over 1 uur
-  static uint32_t tel_1uur_soc = 0 ;                        // Voor middelen over 1 uur
+  static int32_t tel_1min_pIn  = 0 ;                        // Voor middelen over 1 minuut
+  static int32_t tel_1min_pOut = 0 ;                        // Voor middelen over 1 minuut
+  static int32_t tel_1min_soc = 0 ;                         // Voor middelen over 1 minuut
+  static int32_t tel_1uur_pIn  = 0 ;                        // Voor middelen over 1 uur
+  static int32_t tel_1uur_pOut = 0 ;                        // Voor middelen over 1 uur
+  static int32_t tel_1uur_soc = 0 ;                         // Voor middelen over 1 uur
   static uint32_t myseconds = 0 ;                           // Interne klok
-  uint16_t        pIn, pOut, soc ;                          // Te registreren vermogens
+  int16_t         pIn, pOut, soc ;                          // Te registreren vermogens
+  int32_t         sf ;                                      // Factor voor bepalen gemiddelde
 
   dbgTaskInfo() ;                                           // Toon info
   while ( true )
@@ -2323,26 +2334,31 @@ void savetask ( void * parameter )
     timing = 0 ;                                            // Ja, reset timer
     myseconds += cycletime ;                                // Interne klok bijhouden
     claimData ( "savetask" ) ;
-    pIn = rtdata[PWIN].value + 32768 ;                      // Gemeten (P1) netto vermogen
-    pOut = ctdata[DOUT].value + ctdata[COUT].value  ;       // Uitgestuurde vermogen
-    pOut += 32768 ;
+    pIn = rtdata[PWIN].value ;                              // Gemeten (P1) netto vermogen
+    pOut = ctdata[DOUT].value + ctdata[COUT].value  ;       // Uitgestuurde vermogen (één van de twee is nul)
     soc = rtdata[SOC].value ;                               // Batterij lading in procent
     stat_10sec[inx_10sec].pIn = pIn ;                       // Ja, bewaar gegevens in stat_10sec
     stat_10sec[inx_10sec].pOut = pOut ;
     stat_10sec[inx_10sec].soc = soc ;                       // Lading van de batterij in procent
-    tel_1min_pIn += pIn ;                                   // Sommeer t.b.v. minuut gemiddelde
-    tel_1uur_pOut += pOut ;                                 // Sommeer t.b.v. uur gemiddelde
-    tel_1uur_soc += soc ;                                   // Sommeer t.b.v. uur gemiddelde
+    tel_1min_pIn += pIn ;                                   // Sommeer pIn t.b.v. minuut gemiddelde
+    tel_1uur_pIn += pIn ;                                   // Sommeer pIn t.b.v. uur gemiddelde
+    tel_1min_pOut += pOut ;                                 // Sommeer pOut t.b.v. minuut gemiddelde
+    tel_1uur_pOut += pOut ;                                 // Sommeer pOut t.b.v. uur gemiddelde
+    tel_1min_soc += soc ;                                   // Sommeer soc t.b.v. minuut gemiddelde
+    tel_1uur_soc += soc ;                                   // Sommeer soc t.b.v. uur gemiddelde
     if ( ++inx_10sec == STATSIZ )                           // Update de pointer
     {
       inx_10sec = 0 ;
     }
     if ( myseconds % 60 == 0 )                              // 1 minuut voorbij?
     {
-      stat_1min[inx_1min].pIn = tel_1min_pIn / 6 ;          // Ja, bewaar gegevens
-      stat_1min[inx_1min].pOut = tel_1min_pOut / 6 ;
-      tel_1min_pIn = 0 ;                                    // Som weer op 0
+      sf = 60 / cycletime ;                                 // Ja, aantal meetpunten gesampled
+      stat_1min[inx_1min].pIn  = tel_1min_pIn  / sf ;       // Bewaar gegevens
+      stat_1min[inx_1min].pOut = tel_1min_pOut / sf ;
+      stat_1min[inx_1min].soc  = tel_1min_soc  / sf ;
+      tel_1min_pIn  = 0 ;                                   // Sommen weer op 0
       tel_1min_pOut = 0 ;
+      tel_1min_soc  = 0 ;
       if ( ++inx_1min == STATSIZ )                          // Update de pointer
       {
         inx_1min = 0 ;
@@ -2350,10 +2366,13 @@ void savetask ( void * parameter )
     }
     if ( myseconds % 3600 == 0 )                            // 1 uur voorbij?
     {
-      stat_1uur[inx_1uur].pIn = tel_1uur_pIn / 60 ;         // Ja, bewaar gegevens
-      stat_1uur[inx_1uur].pOut = tel_1uur_pOut / 60 ;
-      tel_1uur_pIn = 0 ;                                    // Som weer op 0
+      sf = 3600 / cycletime ;                               // Ja, aantal meetpunten gesampled
+      stat_1uur[inx_1uur].pIn  = tel_1uur_pIn  / sf ;       // Bewaar gegevens
+      stat_1uur[inx_1uur].pOut = tel_1uur_pOut / sf ;
+      stat_1uur[inx_1uur].soc  = tel_1uur_soc  / sf ;
+      tel_1uur_pIn  = 0 ;                                   // Sommen weer op 0
       tel_1uur_pOut = 0 ;
+      tel_1uur_soc  = 0 ;
       if ( ++inx_1uur == STATSIZ )                          // Update de pointer
       {
         inx_1uur = 0 ;
@@ -2449,12 +2468,12 @@ void controltask ( void * parameter )
           pOut = - rtdata[MAXCHG].value ;                   // Ja, beperk laden
         }
       }
-      if ( abs ( pOut ) < 150 )                             // Minder dan 150W (ont)laden doen we niet
+      if ( abs ( pOut ) < minCharge  )                      // Minder dan minimum laad/ontlaad vermogen?
       {
         sprintf ( controltext,
-                  "Laden of ontladen met minder dan 150W "
+                  "Laden of ontladen met minder dan %dW "
                   "(%dW) wordt niet gedaan",
-                  pOut ) ;
+                  minCharge, pOut ) ;
         stop = true ;                                       // Dus stoppen
       }
     }
@@ -2487,7 +2506,10 @@ void controltask ( void * parameter )
     if ( pOut != pOut_old )                                 // Verschil t.o.v. vorige setting?
     {
       xEventGroupSetBits ( taskEvents, MBtaskbit ) ;        // Ja, versnel MBtask
-      dbgprint ( controltext ) ;
+      if ( ( pOut & 0x8000 ) ^ ( pOut_old & 0x8000 ) )      // Geschakeld van ontladen naar laden of andersom?
+      {
+        dbgprint ( controltext ) ;                          // Ja, meld dat in de logging
+      }
     }
   }
 }
@@ -2706,14 +2728,11 @@ void loop()
   }
   if ( updatewebintf )                                    // Firmware update requested?
   {
-    updatefirmware = false ;                              // Yes, clear update flag
-    if ( update_software ( "v_webintf",                   // Update SPIFFS from remote file
-                           updhost.c_str(),
-                           UPDATEDIR, WEBINTFBIN,
-                           U_SPIFFS ) )                   // Resultaat naar SPIFFS partition
-    {
-      resetreq = true ;                                   // And reset
-    }
+    updatewebintf = false ;                               // Yes, clear update flag
+    update_software ( "v_webintf",                        // Update SPIFFS from remote file
+                      updhost.c_str(),
+                      UPDATEDIR, WEBINTFBIN,
+                      U_SPIFFS ) ;                        // Resultaat naar SPIFFS partition
   }
   if ( resetreq )                                         // Reset requested?
   {
