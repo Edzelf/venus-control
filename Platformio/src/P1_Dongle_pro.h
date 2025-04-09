@@ -30,6 +30,28 @@
 #include "ArduinoJson.h"
 //
 //**************************************************************************************************
+//                           P 1 _ D O N G L E _ P R O _ I N I T                                   *
+//**************************************************************************************************
+// Set JSON keys voor power- in en uit.                                                            *
+//**************************************************************************************************
+void p1_dongle_pro_init()
+{
+  if ( field_pIn.isEmpty() )                                // Field pIn al ingevuld?
+  {
+    field_pIn = "power_delivered" ;                         // Nee, gebruik default
+  }
+  if ( field_pOut.isEmpty() )                               // Field pOut al ingevuld?
+  {
+    field_pOut = "power_returned" ;                         // Nee, gebruik default
+  }
+  if ( dongle_api.isEmpty() )                               // API bekend?
+  {
+    dongle_api = "/api/v2/sm/actual" ;                      // Nee, set default
+  }
+}
+
+
+//**************************************************************************************************
 //                                   D O N G L E _ H A N D L E                                     *
 //**************************************************************************************************
 // Lees de JSON structuur van de P1 meter via http.                                                *
@@ -37,17 +59,19 @@
 //**************************************************************************************************
 bool p1_dongle_pro_handle()
 {
-  float p1, p2 ;                                                // Power gebruik en opwek
+  float        p1, p2 ;                                         // Power gebruik en opwek
+  static bool  once = true ;                                    // Om init één keer uit te voeren
 
-  if ( dongle_api.isEmpty() )                                   // API bekend?
+  if ( once )                                                   // Nog initialiseren?
   {
-    dongle_api = "/api/v2/sm/actual" ;                          // Nee, set default
+    p1_dongle_pro_init() ;                                      // Ja, doe dat dan
+    once = false ;                                              // En daarna nooit meer
   }
   if ( read_p1_dongle_http() )                                  // Lees JSON van P1 via http
   {
     claimData ( "P1" ) ;                                        // Claim data gebied
-    p1 = json_doc["power_delivered"]["value"] ;                 // Bepaal netto vermogen (grid naar huis)
-    p2 = json_doc["power_returned"]["value"]  ;                 // Beide zijn in kW
+    p1 = json_doc[field_pIn.c_str()]["value"] ;                 // Bepaal netto vermogen (grid naar huis)
+    p2 = json_doc[field_pOut.c_str()]["value"]  ;               // Beide zijn in kW
     rtdata[PWIN].value = ( p1 - p2 ) * 1000.0 ;                 // Bewaar netto vermogen in Watt
     releaseData() ;
     return true ;                                               // Geef data gebied weer vrij

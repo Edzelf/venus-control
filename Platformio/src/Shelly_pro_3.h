@@ -37,6 +37,24 @@
 #include "ArduinoJson.h"
 //
 //**************************************************************************************************
+//                           S H E L L Y P R O 3 _ I N I T                                         *
+//**************************************************************************************************
+// Set JSON keys voor power- in en uit.                                                            *
+//**************************************************************************************************
+void shellypro3_init()
+{
+  if ( field_pIn.isEmpty() )                                // Field pIn al ingevuld?
+  {
+    field_pIn = "active_power_w" ;                          // Nee, gebruik default
+  }
+  if ( dongle_api.isEmpty() )                               // API bekend?
+  {
+    dongle_api = "/rpc/EM.GetStatus?id=0" ;                 // Nee, set default
+  }
+}
+
+
+//**************************************************************************************************
 //                                   D O N G L E _ H A N D L E                                     *
 //**************************************************************************************************
 // Lees de JSON structuur van de P1 meter via http.                                                *
@@ -45,15 +63,17 @@
 bool shellypro3_handle()
 {
   float p1 ;                                                    // Power gebruik (negatief is opwek)
+  static bool  once = true ;                                    // Om init één keer uit te voeren
 
-  if ( dongle_api.isEmpty() )                                   // API bekend?
+  if ( once )                                                   // Nog initialiseren?
   {
-    dongle_api = "/api/v1/data" ;                               // Nee, set default
+    shellypro3_init() ;                                         // Ja, doe dat dan
+    once = false ;                                              // En daarna nooit meer
   }
   if ( read_p1_dongle_http() )                                  // Lees JSON van P1 via http
   {
     claimData ( "P1" ) ;                                        // Claim data gebied
-    p1 = json_doc["total_act_power"] ;                          // Bepaal netto vermogen (grid naar huis)
+    p1 = json_doc[field_pIn.c_str()] ;                          // Bepaal netto vermogen (grid naar huis)
     rtdata[PWIN].value = p1 * 1000.0 ;                          // Bewaar netto vermogen in Watt
     releaseData() ;
     return true ;                                               // Geef data gebied weer vrij

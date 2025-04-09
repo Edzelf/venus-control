@@ -33,8 +33,10 @@
 // 04-04-2025, ES: Grafieken pagina voor web-interface, minimale charge/discharge.                  *
 // 05-04-2025, ES: No reset on web-interface refresh.                                               *
 // 07-04-2025, ES: Correctie grafieken.                                                             *
+// 08-04-2025, ES: Energie meting via MQTT.                                                         *
+// 09-04-2025, ES: Correctie bug in ophalen dongle data via http.                                   *
 //***************************************************************************************************
-#define VERSION     "Mon, 07 Apr 2025 09:00:00 GMT"       // Current version
+#define VERSION     "Wed, 09 Apr 2025 06:50:00 GMT"       // Current version
 
 #include <Arduino.h>
 #include <soc/soc.h>                    // For brown-out detector setting
@@ -45,6 +47,7 @@
 #include <ArduinoOTA.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <PubSubClient.h>               // MTTQ access
 #include <SPIFFS.h>
 #include <time.h>                       // Tijd functies
 #include <esp_sntp.h>                   // Idem voor time server
@@ -68,6 +71,8 @@
 #define MAXINTF            32                             // Max. number of connected interfaces
                                                           // Highest ID is MAXINTF - 1
 #define FSIF             true                             // Format SPIFFS if not existing
+
+#define MAXMQTTCONNECTS     5                             // Maximum number of MQTT reconnects before give-up
 
 #define SERIAL1        Serial                             // Serial via USB
 // RS485 interface pins:
@@ -106,6 +111,7 @@ const char* analyzeCmd ( const char* par, const char* val ) ;
 bool        read_p1_dongle_http() ;
 void        claimData ( const char* p ) ;
 void        releaseData() ;
+bool        mqttreconnect() ;
 
 
 
@@ -141,7 +147,7 @@ int                DEBUG = 1 ;                          // Debug on/off
 bool               have_psram = false ;                 // Neem aan: geen psram
 const char*        fixedwifi = "" ;                     // Used for FIXEDWIFI option
 String             lssid, lpw ;                         // SSID and password from nvs or FIXEDWIFI
-char               netname[32] = NAME ;                 // Name of AP (if station mode goes wrong)
+char               netname[32] = NAME ;                 // Unieke nodenaam, bijvoorbeeld voor AP
 bool               NetworkFound = false ;               // True if WiFi network connected in STA mode
 char               json_buf[2048] ;                     // Result from P1
 char*              json_begin = json_buf ;              // Begin JSON in json_buf
@@ -152,6 +158,8 @@ statinfo_t*        stat_10sec ;                         // Status per 10 seconde
 int16_t            inx_10sec ;                          // Index in de stat_10sec buffer
 statinfo_t*        stat_1min ;                          // Status per minuut
 int16_t            inx_1min ;                           // Index in de stat_1min buffer
+statinfo_t*        stat_10min ;                         // Status per 10 minuten
+int16_t            inx_10min ;                          // Index in de stat_10min buffer
 statinfo_t*        stat_1uur ;                          // Status per uur
 int16_t            inx_1uur ;                           // Index in de stat_1uur buffer
 int                RS485_pin_rx = RS485PINRX ;          // Default pin for RX of RS485 Serial port
@@ -164,14 +172,18 @@ bool               modbusOkay = false ;                 // False if Modbus error
 String             ipaddress ;                          // Own IP-address
 AsyncWebServer     cmdserver ( 80 ) ;                   // Instance of embedded webserver, port 80
 WiFiClient         P1_client ;                          // TCP client for P1-dongle connection
+WiFiClient         wmqttclient_em ;                     // Instance voor mqtt energiemeter
+PubSubClient       mqttclient_em ( wmqttclient_em ) ;   // Client for MQTT subscriber
 String             dongle ;                             // Type (naam) P1-dongle
 String             dongle_host ;                        // Hostnaam of IP-adres van P1-dongle
+String             mqtt_em ;                            // Username, password, broker voor energie meter
+String             field_pIn ;                          // Field/topic Power delivered voor JSON/MQTT
+String             field_pOut ;                         // Field/topic Power returned voor JSON/MQTT
 u_int16_t          dongle_port = 80 ;                   // TCP Port voor de api, default 80
 String             dongle_api ;                         // Adres van de api
 uint16_t           minCharge = 100 ;                    // Minimale laad/ontlaad vermogen
 bool               P1_host_connected = false ;          // Connection to host is okay
 bool               P1_host_error = false ;              // Connection to host in error
-uint16_t           P1_ackcount ;                        // Number of acks from host
 WiFiClient         otaclient ;                          // For OTA update vanaf update server
 bool               http_reponse_flag = false ;          // Response required
 String             http_getcmd ;                        // Contents of last GET command
@@ -211,6 +223,11 @@ int8_t             clk_offset = 1 ;                     // Offset in hours with 
 int8_t             clk_dst = 1 ;                        // Number of hours shift during DST
 logregel_t*        dbglines ;                           // Array met laatste logregels
 uint16_t           dbglinx = 0 ;                        // Index in dbglines
+bool               mqtt_on = false ;                    // MQTT in use
+uint16_t           mqttport_em = 1883 ;                 // Poort voor MQTT energiemeter, default 1883
+String             mqttuser_em ;                        // User for MQTT energiemeter authentication
+String             mqttpasswd_em ;                      // Password for MQTT energiemeter authentication
+
 
 const esp_partition_t*    nvs = nullptr ;               // Pointer to NVS partition struct
 esp_err_t                 nvserr ;                      // Error code from nvs functions
@@ -300,6 +317,7 @@ controlout_t ctdata[] =                                 // Structure of control 
 #include "P1_Dongle_pro.h"          // smart-stuff.nl model
 #include "Homewizard.h"             // Home Wizard model  (UNTESTED)
 #include "Shelly_pro_3.h"           // Shelly Pro 3 energy meter
+#include "P1_MQTT.h"                // Energie meter via MQTT
 #include "P1_simul.h"               // Simulation of a dongle
 
 
@@ -540,6 +558,44 @@ const char* buildJSON()
   releaseData() ;
   serializeJsonPretty ( doc, bjbuf, sizeof(bjbuf) ) ;     // Maak er een string van
   return bjbuf ;                                          // Geef een mooie structuur terug
+}
+
+
+//**************************************************************************************************
+//                                    M Q T T R E C O N N E C T                                    *
+//**************************************************************************************************
+// Reconnect to broker.                                                                            *
+//**************************************************************************************************
+bool mqttreconnect()
+{
+  static uint32_t retrytime = 0 ;                         // Limit reconnect interval
+  static uint16_t mqttcount = 0 ;                         // Counter MAXMQTTCONNECTS
+  bool            res = false ;                           // Connect result
+
+  if ( ( millis() - retrytime ) < 5000 )                  // Don't try to frequently
+  {
+    return res ;
+  }
+  retrytime = millis() ;                                  // Set time of last try
+  if ( mqttcount > MAXMQTTCONNECTS )                      // Tried too much?
+  {
+    mqtt_on = false ;                                     // Yes, switch off forever
+    return res ;                                          // and quit
+  }
+  mqttcount++ ;                                           // Count the retries
+  dbgprint ( "MQTT (Re)connect %s %s, %d keer",           // Show some debug info
+             mqttuser_em.c_str(),
+             mqttpasswd_em.c_str(),
+             mqttcount ) ;
+  res = mqttclient_em.connect ( netname,                  // Connect to broker
+                                mqttuser_em.c_str(),      // Met deze user
+                                mqttpasswd_em.c_str() ) ; // Met dit password
+  if ( ! res )
+  {
+    dbgprint ( "MQTT connect fout, rc=%d!",
+               mqttclient_em.state() ) ;
+  }
+  return res ;
 }
 
 
@@ -1032,10 +1088,10 @@ bool read_p1_dongle_http()
     }
   }
   P1_client.printf ( "GET %s HTTP/1.1\r\n"                      // Gelukt, gebruik API
-                    "Host: %s\r\n"
-                    "Cache-Control: no-cache\r\n"
-                    "Connection: close\r\n\r\n",
-                    dongle_api.c_str(), dongle_host ) ;
+                     "Host: %s\r\n"
+                     "Cache-Control: no-cache\r\n"
+                     "Connection: close\r\n\r\n",
+                    dongle_api.c_str(), dongle_host.c_str() ) ;
   uint32_t  timeout = millis() ;                                // To detect time-out
   while ( P1_client.available() == 0 )                          // Wait until response appears
   {
@@ -1061,18 +1117,21 @@ bool read_p1_dongle_http()
     {
       if ( line.indexOf ( " 200 " ) < 0 )
       {
+        dbgprint ( "req = GET %s Host: %s", 
+                    dongle_api.c_str(), dongle_host.c_str() ) ;
+        dbgprint ( "line = %s", line.c_str() ) ;                // Debug info
         dbgprint ( "P1, kreeg een non-200 status terug van de api!" ) ;
         P1_client.stop() ;
         return false ;
       }
     }
-    if ( ( tmpl = scan_content_length ( line.c_str() ) ) )      // Scan for content_length
+    if ( ( tmpl = scan_content_length ( line.c_str() ) ) )     // Scan for content_length
     {
       jlen = tmpl ;                                            // Found length
     }
   }
   // End of headers reached
-  if ( ( jlen > 0 ) && ( jlen <= sizeof(json_buf) ) )
+  if ( ( jlen > 0 ) && ( jlen <= ( sizeof(json_buf) -2 ) ) )
   {
     bread = P1_client.readBytes ( (uint8_t*)json_buf,           // Lees minimaal de JSON string
                                   sizeof(json_buf) ) ;
@@ -1080,6 +1139,7 @@ bool read_p1_dongle_http()
     //dbgprint ( "json length is %d", bread ) ;
     if ( bread >= jlen )
     {
+      json_buf[bread] = '\0' ;                                  // Zorg voor delimeter
       json_begin = strstr ( json_buf, "{" ) ;                   // Wijs naar begin van de json string
       if ( json_begin == NULL )
       {
@@ -1543,6 +1603,9 @@ const char* analyzeCmd ( const char* str )
 //   dongle_host                  // IP of hostnaam van de P1 dongle                               *
 //   dongle_port                  // Poort voor P1 request, default 80                             *
 //   dongle_api                   // api van de P1 dongle                                          *
+//   field_pin                    // Field/topic Power delivered voor JSON/MQTT                    *
+//   field_pout                   // Field/topic Power returned voor JSON/MQTT                     *
+//   mqtt_em                      // User, password en broker-IP van MQTT energiemeter             *
 //   test                         // For test purposes                                             *
 //   simul                        // 1 for modbus simulation                                       *
 //   reset                        // Restart the ESP32                                             *
@@ -1604,6 +1667,18 @@ const char* analyzeCmd ( const char* par, const char* val )
   else if ( argument == "dongle_api" )                // api specification van P1 dongle?
   {
     dongle_api = value ;                              // Yes set hostname/IP adres
+  }
+  else if ( argument == "mqtt_em" )                   // Gegevens voor MQTT van de energiemeter?
+  {
+    mqtt_em = value ;                                 // Ja, zet gegevens klaar
+  }
+  else if ( argument == "field_pin" )                 // JSON item of MQTT topic voor power delivered?
+  {
+    field_pIn = value ;                               // Ja, zet veldnaam klaar
+  }
+  else if ( argument == "field_pout" )                // JSON item of MQTT topic voor power returned?
+  {
+    field_pOut = value ;                              // Ja, zet veldnaam klaar
   }
   else if ( argument == "updhost" )                   // Updatehost specification?
   {
@@ -1859,7 +1934,6 @@ bool nvssearch ( const char* key )
 void initprefs()
 {
   nvsclear() ;                                                  // Erase all keys
-  nvssetstr ( "updhost",      UPDATEHOST          ) ;
   nvssetstr ( "v_firmware",   ""                  ) ;
   nvssetstr ( "v_webintf",    ""                  ) ;
   nvssetstr ( "dongle",       "P1_Dongle_Pro"     ) ;
@@ -1915,6 +1989,11 @@ void handle_getgraph ( AsyncWebServerRequest *request )
   {
     graph = (const uint8_t*)stat_1min ;                     // Ja
     inx = inx_1min ;
+  }
+  else if ( graphName == "10min" )                          // 100 x 10 minuten?
+  {
+    graph = (const uint8_t*)stat_10min ;                    // Ja
+    inx = inx_10min ;
   }
   else if ( graphName == "1uur" )                           // 100 x 1 uur?
   {
@@ -2240,60 +2319,75 @@ void MBtask ( void * parameter )
 //**************************************************************************************************
 void readP1task ( void * parameter )
 {
-  static uint16_t timing = INT16_MAX ;                        // Timer voor 5 seconden
-  static uint16_t err_row = 0 ;                               // Telt aantal fouten in een rij
-  bool            p1_res ;                                    // Laatste resultaat uitlezen dongle
+  static uint16_t timing = INT16_MAX ;                          // Timer voor 5 seconden
+  static uint16_t err_row = 0 ;                                 // Telt aantal fouten in een rij
+  bool            p1_res ;                                      // Laatste resultaat uitlezen dongle
 
-  dbgTaskInfo() ;                                             // Toon info
+  dbgTaskInfo() ;                                               // Toon info
   while ( true )
   {
-    xEventGroupWaitBits ( taskEvents, readP1taskbit,          // Wacht op trigger
-                          pdTRUE, pdFALSE, 5000 ) ;           // Clear bits on exit, 5 seconds time-out
-    if ( ++timing < 5 )                                       // Tijd voor actie?
+    if ( xEventGroupWaitBits ( taskEvents, readP1taskbit,       // Is er een trigger?
+                               pdTRUE, pdFALSE, 10 ) )          // Clear bits on exit
     {
-      continue ;                                              // Nee, uitstellen
-    }
-    timing = 0 ;                                              // Ja, reset timer
-    if ( simul || dongle.equalsIgnoreCase ( "P1_Simul" ) )    // Gebruik maken van een gesimuleerde dongle?
-    {
-       p1_res = p1_simul_handle() ;                           // Ja, genereer gesimuleerde vermogens
-    }
-    else if ( dongle.equalsIgnoreCase ( "P1_Dongle_Pro" ) )   // Nee, is het een P1_Dongle_Pro?
-    {
-       p1_res = p1_dongle_pro_handle() ;                      // Ja, haal vermogens
-    }
-    else if ( dongle.equalsIgnoreCase ( "Homewizard" ) )      // Nee, is het een Homewizard?
-    {
-       p1_res = homewizard_handle() ;                         // Ja, haal vermogens
-    }
-    else if ( dongle.equalsIgnoreCase ( "Shellypro3" ) )      // Nee, is het een Shelly Pro 3?
-    {
-       p1_res = shellypro3_handle() ;                         // Ja, haal vermogens
-    }
-    else
-    {
-      p1_res = false ;
-      dbgprint ( "Dongle %s is onbekend", dongle.c_str() ) ;
-      delay ( 30000 ) ;                                       // Misschien over 30 seconden?
-    }
-    if ( p1_res )                                             // Dongle uitlezen gelukt?
-    {
-      err_row = 0 ;                                           // Ja, reset aantal fouten in een rij
-      xEventGroupSetBits ( taskEvents, controltaskbit ) ;     // Start controltask
-    }
-    else
-    {
-      if ( ++err_row >= 5 )                                   // Nee, gebeurt dat vaak?
+      if ( ++timing < 5 )                                       // Tijd voor actie?
       {
-        dbgprint ( "Lange storing bij lezen P1 dongle!" ) ;   // Ja, log dat
-        errorcount++ ;                                        // Tel aantal fouten
+        continue ;                                              // Nee, uitstellen
+      }
+      timing = 0 ;                                              // Ja, reset timer
+      if ( simul || dongle.equalsIgnoreCase ( "P1_Simul" ) )    // Gebruik maken van een gesimuleerde dongle?
+      {
+        p1_res = p1_simul_handle() ;                            // Ja, genereer gesimuleerde vermogens
+      }
+      else if ( dongle.equalsIgnoreCase ( "P1_Dongle_Pro" ) )   // Nee, is het een P1_Dongle_Pro?
+      {
+        p1_res = p1_dongle_pro_handle() ;                       // Ja, haal vermogens
+      }
+      else if ( dongle.equalsIgnoreCase ( "Homewizard" ) )      // Nee, is het een Homewizard?
+      {
+        p1_res = homewizard_handle() ;                          // Ja, haal vermogens
+      }
+      else if ( dongle.equalsIgnoreCase ( "Shellypro3" ) )      // Nee, is het een Shelly Pro 3?
+      {
+        p1_res = shellypro3_handle() ;                          // Ja, haal vermogens
+      }
+      else if ( dongle.equalsIgnoreCase ( "P1_MQTT" ) )         // Nee, is het een energiemeter via MQTT?
+      {
+        p1_res = p1_mqtt_handle() ;                             // Ja, haal vermogens
+      }
+      else
+      {
+        p1_res = false ;
+        dbgprint ( "Dongle %s is onbekend", dongle.c_str() ) ;
+        delay ( 30000 ) ;                                       // Misschien over 30 seconden?
+      }
+      if ( p1_res )                                             // Dongle uitlezen gelukt?
+      {
+        err_row = 0 ;                                           // Ja, reset aantal fouten in een rij
+        xEventGroupSetBits ( taskEvents, controltaskbit ) ;     // Start controltask
+      }
+      else
+      {
+        if ( ++err_row >= 5 )                                   // Nee, gebeurt dat vaak?
+        {
+          dbgprint ( "Lange storing bij lezen P1 dongle!" ) ;   // Ja, log dat
+          errorcount++ ;                                        // Tel aantal fouten
+        }
+      }
+      //dbgprint ( "Netto vermogen is %d", rtdata[PWIN].value ) ;
+      wdgfeed() ;                                               // Voeden van de waakhond
+      claimData ( "loop" ) ;
+      rtdata[ERRCNT].value = errorcount ;                       // Neem ook error count over in de data
+      releaseData() ; 
+    }
+    // We komen hier na een trigger, maar ook elke 10 msec
+    if ( mqtt_on )
+    {
+      mqttclient_em.loop() ;                                    // Onderhouden van MQTT connectie
+      if ( !mqttclient_em.connected() )                         // Test of er een verbinding is
+      {
+        mqttreconnect() ;                                       // Nee, reconnect
       }
     }
-    //dbgprint ( "Netto vermogen is %d", rtdata[PWIN].value ) ;
-    wdgfeed() ;                                               // Voeden van de waakhond
-    claimData ( "loop" ) ;
-    rtdata[ERRCNT].value = errorcount ;                       // Neem ook error count over in de data
-    releaseData() ; 
   }
 }
 
@@ -2311,6 +2405,9 @@ void savetask ( void * parameter )
   static int32_t tel_1min_pIn  = 0 ;                        // Voor middelen over 1 minuut
   static int32_t tel_1min_pOut = 0 ;                        // Voor middelen over 1 minuut
   static int32_t tel_1min_soc = 0 ;                         // Voor middelen over 1 minuut
+  static int32_t tel_10min_pIn  = 0 ;                       // Voor middelen over 10 minuten
+  static int32_t tel_10min_pOut = 0 ;                       // Voor middelen over 10 minuten
+  static int32_t tel_10min_soc = 0 ;                        // Voor middelen over 10 minuten
   static int32_t tel_1uur_pIn  = 0 ;                        // Voor middelen over 1 uur
   static int32_t tel_1uur_pOut = 0 ;                        // Voor middelen over 1 uur
   static int32_t tel_1uur_soc = 0 ;                         // Voor middelen over 1 uur
@@ -2340,12 +2437,15 @@ void savetask ( void * parameter )
     stat_10sec[inx_10sec].pIn = pIn ;                       // Ja, bewaar gegevens in stat_10sec
     stat_10sec[inx_10sec].pOut = pOut ;
     stat_10sec[inx_10sec].soc = soc ;                       // Lading van de batterij in procent
-    tel_1min_pIn += pIn ;                                   // Sommeer pIn t.b.v. minuut gemiddelde
-    tel_1uur_pIn += pIn ;                                   // Sommeer pIn t.b.v. uur gemiddelde
-    tel_1min_pOut += pOut ;                                 // Sommeer pOut t.b.v. minuut gemiddelde
-    tel_1uur_pOut += pOut ;                                 // Sommeer pOut t.b.v. uur gemiddelde
-    tel_1min_soc += soc ;                                   // Sommeer soc t.b.v. minuut gemiddelde
-    tel_1uur_soc += soc ;                                   // Sommeer soc t.b.v. uur gemiddelde
+    tel_1min_pIn  += pIn ;                                  // Sommeer pIn t.b.v. minuut gemiddelde
+    tel_10min_pIn += pIn ;                                  // Sommeer pIn t.b.v. 10 minuten gemiddelde
+    tel_1uur_pIn  += pIn ;                                  // Sommeer pIn t.b.v. uur gemiddelde
+    tel_1min_pOut  += pOut ;                                // Sommeer pOut t.b.v. minuut gemiddelde
+    tel_10min_pOut += pOut ;                                // Sommeer pOut t.b.v. 10 minuten gemiddelde
+    tel_1uur_pOut  += pOut ;                                // Sommeer pOut t.b.v. uur gemiddelde
+    tel_1min_soc  += soc ;                                  // Sommeer soc t.b.v. minuut gemiddelde
+    tel_10min_soc += soc ;                                  // Sommeer soc t.b.v. 10 minuten gemiddelde
+    tel_1uur_soc  += soc ;                                  // Sommeer soc t.b.v. uur gemiddelde
     if ( ++inx_10sec == STATSIZ )                           // Update de pointer
     {
       inx_10sec = 0 ;
@@ -2362,6 +2462,20 @@ void savetask ( void * parameter )
       if ( ++inx_1min == STATSIZ )                          // Update de pointer
       {
         inx_1min = 0 ;
+      }
+    }
+    if ( myseconds % 600 == 0 )                             // 10 minuut voorbij?
+    {
+      sf = 600 / cycletime ;                                // Ja, aantal meetpunten gesampled
+      stat_10min[inx_10min].pIn  = tel_10min_pIn  / sf ;    // Bewaar gegevens
+      stat_10min[inx_10min].pOut = tel_10min_pOut / sf ;
+      stat_10min[inx_10min].soc  = tel_10min_soc  / sf ;
+      tel_10min_pIn  = 0 ;                                   // Sommen weer op 0
+      tel_10min_pOut = 0 ;
+      tel_10min_soc  = 0 ;
+      if ( ++inx_10min == STATSIZ )                          // Update de pointer
+      {
+        inx_10min = 0 ;
       }
     }
     if ( myseconds % 3600 == 0 )                            // 1 uur voorbij?
@@ -2410,7 +2524,7 @@ void controltask ( void * parameter )
     pOut_old = rtdata[SETBC].value ;                        // Huidige setting
     pIn = rtdata[PWIN].value ;                              // Haal huidige input van grid
     pOut = pIn + pOut_old ;                                 // Benodigde ontlaad capaciteit (indien positief)
-    pOut = ( pOut_old + pOut * 2 ) / 3 ;                    // Beetje filteren
+    //pOut = ( pOut_old + pOut * 2 ) / 3 ;                  // Beetje filteren
     ctdata[CM485].value = MODBUS_ENABLE ;                   // Neem aan dat RS485 sturing mag
     // Kijk of er handmatige setting is.
     if ( strstr ( controlmod, "stb" ) )                     // Manual stand-by?
@@ -2555,9 +2669,11 @@ void setup()
     uint16_t nbytes = sizeof(statinfo_t) * STATSIZ ;        // Size of statistic buffer
     stat_10sec = (statinfo_t*)ps_malloc ( nbytes ) ;        // Allocate the buffers for statistic data
     stat_1min  = (statinfo_t*)ps_malloc ( nbytes ) ;
+    stat_10min = (statinfo_t*)ps_malloc ( nbytes ) ;
     stat_1uur  = (statinfo_t*)ps_malloc ( nbytes ) ;
     memset ( stat_10sec, 0, nbytes ) ;                      // Clear 10 seconds buffer
     memset ( stat_1min,  0, nbytes ) ;                      // Clear 1 minuut buffer
+    memset ( stat_10min, 0, nbytes ) ;                      // Clear 10 minuten buffer
     memset ( stat_1uur,  0, nbytes ) ;                      // Clear 1 uur buffer
   }
   dbgprint ( "Start " NAME ", version %s",                  // Show start-up info
@@ -2738,14 +2854,17 @@ void loop()
   {
     dbgprint ( "Reset gevraagd..." ) ;                    // Yes, show
     P1_client.stop() ;                                    // Disconnect from P1-port
-    delay ( 1000 ) ;                                      // Wait some time
+    vTaskDelete ( xcontroltask ) ;                        // Stop controltask
+    ctdata[FORCE].value = 0 ;                             // Schakel naar stop
+    xEventGroupSetBits ( taskEvents, MBtaskbit ) ;        // Vrsnel MBtask
+    delay ( 500 ) ;                                       // Wait some time
     ESP.restart() ;                                       // Reboot
   }
   scanserial() ;                                          // Handle serial input
-  if ( errorcount >= 1000 )                               // Too much errors?
+  if ( errorcount >= 1000 )                               // Teveel fouten?
   {
     dbgprint ( "Foutteller te hoog!  Reset.." ) ;
-    resetreq = true ;                                     // Yes, force reset
+    resetreq = true ;                                     // Ja, forceer reset
   }
   delay ( 10 ) ;
 }
