@@ -8,7 +8,7 @@
  </head>
  <body>
   <ul> 
-   <li><a class='pull-left' href='index.html'>Home</a></li>
+   <li><a class='pull-left' href='index.html'>Actueel</a></li>
    <li><a class='pull-left' href='graph.html'>Grafieken</a></li>
    <li><a class='pull-left' href='manual.html'>Handmatig</a></li> 
    <li><a class='pull-left' active href='config.html'>Config</a></li> 
@@ -19,7 +19,7 @@
    <h1>** Venus-control **</h1>
    <p>Je kunt hier de configuratie wijzigen.<br><i>Let op: sommige wijzigingen hebben pas effect na herstart.</i>
    </p>
-   <textarea rows="20" cols="60" id="prefs">Bezig met laden van de configuratie</textarea> 
+   <textarea rows="20" cols="70" id="prefs">Bezig met laden van de configuratie</textarea> 
    <br>
    <button class="button" onclick="fsav()">Opslaan</button>
    &nbsp;&nbsp;
@@ -66,8 +66,8 @@
      // Save the preferences
      function fsav()
      {
-       var str = prefs.value ;
-       var theUrl = "saveprefs?version=" + Math.random() + "&";
+       var str = prefs.value + "\n" ;
+       var theUrl = "saveprefs?version=" + Math.random() + "&" ;
        var xhr = new XMLHttpRequest() ;
        xhr.onreadystatechange = function()
        {

@@ -11,7 +11,7 @@
 </head>
 <body>
  <ul> 
-  <li><a class='pull-left' href='index.html'>Home</a></li>
+  <li><a class='pull-left' href='index.html'>Actueel</a></li>
   <li><a class='pull-left active' href='graph.html'>Grafieken</a></li>
   <li><a class='pull-left' href='manual.html'>Handmatig</a></li> 
   <li><a class='pull-left' href='config.html'>Config</a></li> 
@@ -30,8 +30,10 @@
      <label for="k1">Registratie per 10 seconden</label><br>
      <input type="radio" id="k2" name="gt" value="1min" onclick="radioclick('1min')">
      <label for="k2">Registratie per 1 minuut</label><br>
-     <input type="radio" id="k3" name="gt" value="1uur" onclick="radioclick('1uur')">
-     <label for="k3">Registratie per 1 uur</label><br>
+     <input type="radio" id="k3" name="gt" value="10min" onclick="radioclick('10min')">
+     <label for="k3">Registratie per 10 minuten</label><br>
+     <input type="radio" id="k4" name="gt" value="1uur" onclick="radioclick('1uur')">
+     <label for="k4">Registratie per 1 uur</label><br>
     </td>
   </tr>
  </table>
@@ -57,7 +59,7 @@ function radioclick(a)
 
 function checkRadio()
 {
-  if ( ( k1.checked || k2.checked || k3.checked ) == false )
+  if ( ( k1.checked || k2.checked || k3.checked || k4.checked ) == false )
   {
     k1.checked = true ;
   }
@@ -79,6 +81,14 @@ function checkRadio()
     graphTitle = "Venus regeling laatste 100 minuten" ; // Pas titel aan
   }
   if ( k3.checked )
+  {
+    t = "10min" ;                                       // Set graph type naar 10 minuten
+    xscaletext = "Tijdstip (minuten)";                  // Tekst bij x-as
+    xscale = 10 ;                                       // Schaal unit 10
+    refrIntv = 600000 ;                                 // En pas refresh tijd aan
+    graphTitle = "Venus regeling laatste 16 uur" ;      // Pas titel aan
+  }
+  if ( k4.checked )
   {
     t = "1uur" ;                                        // Set graph type naar 1 uur
     xscaletext = "Tijdstip (uur)";                      // Tekst bij x-as
