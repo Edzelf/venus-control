@@ -20,7 +20,6 @@ Plannen voor de verbeterde versie zijn:
 Ik weet dat er mogelijkheden zijn om Home Automation (HA) te gebruiken voor de sturing van de batterij, maar dit project is gericht op een zelfstandige plug-en-play oplossing.
 
 Ontwikkkeling:
-* 25-03-2025 - Betere ModBus driver. Ondersteuning voor Homewizard P1 dongle (ONGETEST).
 * 12-02-2025 - Eerste versie van de documentatie, ModBus getest met een USB converter onder Linux, programmeren gestart.
 * 12-02-2025 - Uitlezen P1 dongle (WiFi) werkt inmiddels.  Dongle iP1_Dongle_Pro van smart-stuff.nl
 * 13-02-2025 - Simulatie dongle gemaakt.  Dient om later een besturingsmodel te kunnen testen.
@@ -31,6 +30,9 @@ Ontwikkkeling:
 * 04-03-2025 - Uitgebreid getest.  Print ontworpen en besteld bij PCBWay.
 * 13-03-2025 - Print gereed. Duurtest gestart.
 * 20-03-2025 - Uitbreiding met handmatige instelling.
+* 25-03-2025 - Betere ModBus driver. Ondersteuning voor Homewizard P1 dongle (ONGETEST).
+* 08-04-2025 - Energie meting via MQTT.  Instelling voor kW of Watt meting.
+* 10-04-2025 - Eenvoudig flashen van de software via webbrowser inclusief preset van WiFi credentials.
 
 ![image](https://github.com/user-attachments/assets/3c637cd9-2cd4-4d71-962b-d980cc887dc8)
 
