@@ -34,9 +34,11 @@
 // 05-04-2025, ES: No reset on web-interface refresh.                                               *
 // 07-04-2025, ES: Correctie grafieken.                                                             *
 // 08-04-2025, ES: Energie meting via MQTT.                                                         *
-// 09-04-2025, ES: Correctie bug in ophalen dongle data via http.                                   *
+// 09-04-2025, ES: Correctie bug in ophalen dongle data via http, schaalfactor voor energie.        *
+// 10-04-2025, ES: Initiële WiFi credentials verwacht in coredump partition.                        *
+// 11-04-2025, ES: Correctie registratie van batterij opladen.  Statistieken in RTC geheugen.       *
 //***************************************************************************************************
-#define VERSION     "Wed, 09 Apr 2025 06:50:00 GMT"       // Current version
+#define VERSION     "Fri, 11 Apr 2025 14:45:00 GMT"       // Current version
 
 #include <Arduino.h>
 #include <soc/soc.h>                    // For brown-out detector setting
@@ -90,6 +92,7 @@
 #define MODBUS_DISABLE    0x55BB                          // RS485 control mode disable in register 42000
 
 #define STATSIZ           100                             // Aantal punten in de statinfo_t buffers
+#define VALIDDATA         0xFA1500FF                      // Code voor valid data in statistieken
 
 //***************************************************************************************************
 // Forward declarations.                                                                            *
@@ -124,17 +127,30 @@ struct logregel_t                                           // Voor array met lo
    char logregel[DEBUG_SAVE_LINES][DEBUG_BUFFER_SIZE+20] ;  // Ruimte voor flink aantal logregels
 } ;
 
-struct WifiInfo_t                               // For list with WiFi info
-{
-  char * ssid ;                                 // SSID for an entry
-  char * passphrase ;                           // Passphrase for an entry
-} ;
+// Structuur voor de statistieken
+enum statst_t { SEC10, MIN1, MIN10, UUR1 } ;    // Geeft 1 van de 4 grafieken aan
 
-struct statinfo_t                               // Statistiekbuffer, round robin
+struct stats2_t                                 // Statistiekbuffer, 1 meting
 {
   int16_t pIn ;                                 // Netto energie in Watts + 32768
   int16_t pOut ;                                // Laad/ontlaad setting + 32768
   uint8_t soc ;                                 // Percentage opgeladen
+} ;
+
+struct stats1_t                                 // Statistiekbuffer, 1 type (10sec,1min,10min,1uur)
+{
+  int8_t   inx ;                                // Index in round robin buffer
+  int16_t  sumpoints ;                          // Aantal metingen gemiddeld
+  int32_t  sum_pIn ;                            // Sum t.b.v. gemiddelde pIn
+  int32_t  sum_pOut ;                           // Sum t.b.v. gemiddelde pOut
+  int32_t  sum_soc ;                            // Sum t.b.v. gemiddelde soc
+  stats2_t buf[STATSIZ] ;                       // De data
+} ;
+
+struct stats0_t                                 // De 4 statistiekbuffers (10sec,1min,10min,1uur)
+{
+  int32_t  valid ;                              // Voor testen validiteit na reset
+  stats1_t soort[4] ;                           // Dit zijn de 4 statistieken
 } ;
 
 
@@ -146,6 +162,7 @@ int                DEBUG = 1 ;                          // Debug on/off
 //
 bool               have_psram = false ;                 // Neem aan: geen psram
 const char*        fixedwifi = "" ;                     // Used for FIXEDWIFI option
+const char*        emptyWifiCred = "myssid/mypasswd" ;  // Credentials indien er geen echte zijn
 String             lssid, lpw ;                         // SSID and password from nvs or FIXEDWIFI
 char               netname[32] = NAME ;                 // Unieke nodenaam, bijvoorbeeld voor AP
 bool               NetworkFound = false ;               // True if WiFi network connected in STA mode
@@ -154,14 +171,6 @@ char*              json_begin = json_buf ;              // Begin JSON in json_bu
 char               controltext[128] ;                   // Status van controltask, dit is een tekst
 char               controlmod[4] = "nom";               // Controller mode, "stb", "nom", "off" of "man"
 int                man_setpoint ;                       // Setpoint in manual mode
-statinfo_t*        stat_10sec ;                         // Status per 10 seconden
-int16_t            inx_10sec ;                          // Index in de stat_10sec buffer
-statinfo_t*        stat_1min ;                          // Status per minuut
-int16_t            inx_1min ;                           // Index in de stat_1min buffer
-statinfo_t*        stat_10min ;                         // Status per 10 minuten
-int16_t            inx_10min ;                          // Index in de stat_10min buffer
-statinfo_t*        stat_1uur ;                          // Status per uur
-int16_t            inx_1uur ;                           // Index in de stat_1uur buffer
 int                RS485_pin_rx = RS485PINRX ;          // Default pin for RX of RS485 Serial port
 int                RS485_pin_tx = RS485PINTX ;          // Default pin for TX of RS485 Serial port
 int                RS485_pin_de = RS485PINDE ;          // Pin for enabling xmit of MAX485 (config)
@@ -181,6 +190,7 @@ String             field_pIn ;                          // Field/topic Power del
 String             field_pOut ;                         // Field/topic Power returned voor JSON/MQTT
 u_int16_t          dongle_port = 80 ;                   // TCP Port voor de api, default 80
 String             dongle_api ;                         // Adres van de api
+float              dongle_schaal = 1000.0 ;             // 1000 voor kW, 1 voor Watt
 uint16_t           minCharge = 100 ;                    // Minimale laad/ontlaad vermogen
 bool               P1_host_connected = false ;          // Connection to host is okay
 bool               P1_host_error = false ;              // Connection to host in error
@@ -229,11 +239,12 @@ String             mqttuser_em ;                        // User for MQTT energie
 String             mqttpasswd_em ;                      // Password for MQTT energiemeter authentication
 
 
+const esp_partition_t*    spiffs = nullptr ;            // Pointer to SPIFFS partition struct
+const esp_partition_t*    coredump = nullptr ;          // Pointer naar WiFi info in coredump
 const esp_partition_t*    nvs = nullptr ;               // Pointer to NVS partition struct
 esp_err_t                 nvserr ;                      // Error code from nvs functions
 uint32_t                  nvshandle = 0 ;               // Handle for nvs access
 char                      nvskeys[MAXKEYS][16] ;        // Space for NVS keys
-const esp_partition_t*    spiffs = nullptr ;            // Pointer to SPIFFS partition struct
 //
 // For Neopixel
 Adafruit_NeoPixel neopixel ( 1, NEOPIN, NEO_RGB + NEO_KHZ800 ) ;
@@ -308,6 +319,8 @@ controlout_t ctdata[] =                                 // Structure of control 
 
 #define NUMOREGS ( sizeof(ctdata) / sizeof(ctdata[0]) )
 
+// Data in RTC geheugen.  Blijft bewaard bij soft reset, niet bij reset button of power on.
+RTC_NOINIT_ATTR stats0_t statistics ;         // Ruimte voor de statistieken.
 
 //**************************************************************************************************
 // End of global data section.                                                                     *
@@ -647,24 +660,49 @@ void WiFiEvent ( WiFiEvent_t event )
 //**************************************************************************************************
 void  setWifiCred()
 {
-  String      buf ;                                     // "SSID/password"
-  int         inx ;                                     // Place of "/"
+  String      buf ;                                       // "SSID/password"
+  int         inx ;                                       // Place of "/"
   const char* key = "wifi" ;
+  char        coredumpbuf[128] ;                          // Ruimte voor data uit coredump partition
 
-  buf = String ( "" ) ;                                 // Clear buffer with ssid/passwd
-  if ( *fixedwifi )                                     // FIXEDWIFI set and not empty?
+  buf = String ( "" ) ;                                   // Clear buffer with ssid/passwd
+  if ( *fixedwifi )                                       // FIXEDWIFI set and not empty?
   {
-    buf = String ( fixedwifi ) ;                        // Ja, neem over
+    buf = String ( fixedwifi ) ;                          // Ja, neem over
   }
-  if ( nvssearch ( key ) )                              // Ook specificatie in preferences?
+  if ( nvssearch ( key ) )                                // Ook specificatie in preferences?
   {
-    buf = nvsgetstr ( key ) ;                           // Ja, neem over
+    buf = nvsgetstr ( key ) ;                             // Ja, neem over
+    if ( strcmp ( buf.c_str(), emptyWifiCred ) == 0 )     // Nog onbekend?
+    {
+      buf = String ( "" ) ;                               // Ja, maak leeg
+    }
   }
-  inx = buf.indexOf ( "/" ) ;                           // Find separator between ssid and password
-  if ( inx > 0 )                                        // Separator found?
+  if ( buf.isEmpty() && ( coredump != nullptr ) )         // Nog steeds niet gedefinieerd?
   {
-    lpw = buf.substring ( inx + 1 ) ;                   // Isolate password
-    lssid = buf.substring ( 0, inx ) ;                  // Holds SSID now
+    if ( esp_partition_read ( coredump, 0, coredumpbuf,   // Lees een daael van de coredump partitie
+                              sizeof(coredumpbuf) ) == ESP_OK )
+    {
+      if ( strcmp ( coredumpbuf,                          // Staan er credentials in coredump (van Esptool)?
+                    "VenusSecret$777" ) == 0 )
+      {
+        buf = String ( coredumpbuf + 16 ) ;               // Ja, probeer die
+        dbgprint ( "Initiële WiFi credentials %s "
+                   "gevonden",
+                   buf.c_str() ) ;
+      }
+    }
+  }
+  if ( buf.isEmpty() )                                    // Nog steeds leeg?
+  {
+    buf = String ( emptyWifiCred ) ;                      // Ja, dan toch maar een fantasie netwerk
+  }
+  inx = buf.indexOf ( "/" ) ;                             // Zoek scheiding tussen ssid en password
+  if ( inx > 0 )                                          // Scheiding gevonden?
+  {
+    lpw = buf.substring ( inx + 1 ) ;                     // Ja, isoleer password
+    lssid = buf.substring ( 0, inx ) ;                    // Is nu SSID
+    nvssetstr ( "wifi", buf ) ;
   }
 }
 
@@ -1603,6 +1641,7 @@ const char* analyzeCmd ( const char* str )
 //   dongle_host                  // IP of hostnaam van de P1 dongle                               *
 //   dongle_port                  // Poort voor P1 request, default 80                             *
 //   dongle_api                   // api van de P1 dongle                                          *
+//   dongle_schaal                // 1000 voor kW, 1 voor Watt in de API                           *
 //   field_pin                    // Field/topic Power delivered voor JSON/MQTT                    *
 //   field_pout                   // Field/topic Power returned voor JSON/MQTT                     *
 //   mqtt_em                      // User, password en broker-IP van MQTT energiemeter             *
@@ -1667,6 +1706,10 @@ const char* analyzeCmd ( const char* par, const char* val )
   else if ( argument == "dongle_api" )                // api specification van P1 dongle?
   {
     dongle_api = value ;                              // Yes set hostname/IP adres
+  }
+  else if ( argument == "dongle_schaal" )             // api factor voor omrekenen naar Watt?
+  {
+    dongle_schaal = ivalue ;                          // Ja, set factor 1000 of 1
   }
   else if ( argument == "mqtt_em" )                   // Gegevens voor MQTT van de energiemeter?
   {
@@ -1939,7 +1982,7 @@ void initprefs()
   nvssetstr ( "dongle",       "P1_Dongle_Pro"     ) ;
   nvssetstr ( "dongle_api",   "/api/v2/sm/actual" ) ;
   nvssetstr ( "dongle_host",  "192.168.1.54"      ) ;
-  nvssetstr ( "wifi",         "myssid/mypasswd"   ) ;
+  nvssetstr ( "wifi",         emptyWifiCred       ) ;
 }
 
 
@@ -1982,30 +2025,29 @@ void handle_getgraph ( AsyncWebServerRequest *request )
   String                 graphName ;                        // Naam van de gewenste grafiek
   const uint8_t*         graph ;                            // Wijs naar 1 van de 3 grafieken
   int                    inx ;                              // Index in één van de 3 grafieken
+  int                    tinx = SEC10 ;                     // SEC10, MIN1, MIN10 of UUR1
 
   graphName =request->arg ( "t" ) ;                         // Welke grafiek is gewenst?
   //dbgprint ( "HTTP get graph %s", graphName.c_str() ) ;   // Show request
-  if ( graphName == "1min" )                                // 100 x 1 minuut?
+  if ( graphName == "10sec" )                               // 100 x 10 seconden?
   {
-    graph = (const uint8_t*)stat_1min ;                     // Ja
-    inx = inx_1min ;
+    tinx = SEC10 ;                                          // Het gaat om deze grafiek
   }
-  else if ( graphName == "10min" )                          // 100 x 10 minuten?
+  else if ( graphName == "1min" )                           // 100 x 1 minuut?
   {
-    graph = (const uint8_t*)stat_10min ;                    // Ja
-    inx = inx_10min ;
+    tinx = MIN1 ;                                           // Het gaat om deze grafiek
   }
-  else if ( graphName == "1uur" )                           // 100 x 1 uur?
+  else if ( graphName == "10min" )                               // 100 x 10 minuten?
   {
-    graph = (const uint8_t*)stat_1uur ;                     // Ja
-    inx = inx_1uur ;
+    tinx = MIN10 ;                                          // Het gaat om deze grafiek
   }
-  else                                                      // Anders 100 x 10 sec
+  else if ( graphName == "1uur" )                                // 100 x 1 uur?
   {
-    graph = (const uint8_t*)stat_10sec ;
-    inx = inx_10sec ;
+    tinx = UUR1 ;                                           // Het gaat om deze grafiek
   }
-  statslen = sizeof(statinfo_t) * STATSIZ ;                 // Lengte van de te versturen data
+  graph = (const uint8_t*)statistics.soort[tinx].buf ;      // Pointer naar de juiste grafiek
+  inx = statistics.soort[tinx].inx ;                        // Pak bijbehorende index
+  statslen = sizeof(stats2_t) * STATSIZ ;                   // Lengte van de te coderen data
   encoded = b64c.encode ( graph,                            // Encode de data
                           statslen ) ;
   response = request->beginResponse (                       // Definieer de response
@@ -2400,96 +2442,45 @@ void readP1task ( void * parameter )
 //**************************************************************************************************
 void savetask ( void * parameter )
 {
+  int             tinx ;                                    // Grafiek nummer
   const  uint16_t cycletime = 10 ;                          // Cycle time in seconden
-  static uint16_t timing = INT16_MAX ;                      // Timer voor 5 seconden
-  static int32_t tel_1min_pIn  = 0 ;                        // Voor middelen over 1 minuut
-  static int32_t tel_1min_pOut = 0 ;                        // Voor middelen over 1 minuut
-  static int32_t tel_1min_soc = 0 ;                         // Voor middelen over 1 minuut
-  static int32_t tel_10min_pIn  = 0 ;                       // Voor middelen over 10 minuten
-  static int32_t tel_10min_pOut = 0 ;                       // Voor middelen over 10 minuten
-  static int32_t tel_10min_soc = 0 ;                        // Voor middelen over 10 minuten
-  static int32_t tel_1uur_pIn  = 0 ;                        // Voor middelen over 1 uur
-  static int32_t tel_1uur_pOut = 0 ;                        // Voor middelen over 1 uur
-  static int32_t tel_1uur_soc = 0 ;                         // Voor middelen over 1 uur
-  static uint32_t myseconds = 0 ;                           // Interne klok
+  const  int16_t  seconds[] = { 10, 60, 600, 3600 } ;       // Interval per grafiek
+  static uint32_t myseconds = -1 ;                          // Interne klok
   int16_t         pIn, pOut, soc ;                          // Te registreren vermogens
-  int32_t         sf ;                                      // Factor voor bepalen gemiddelde
 
   dbgTaskInfo() ;                                           // Toon info
   while ( true )
   {
     xEventGroupWaitBits ( taskEvents, savetaskbit,          // Wacht op trigger
                           pdTRUE, pdFALSE, 10000 ) ;        // Clear bits on exit, 10 seconds time-out
-    if ( ++timing < cycletime )                             // Tijd voor actie?
+    if ( ++myseconds % cycletime )                          // Tijd voor actie (10, 20, 30, enz.)?
     {
       continue ;                                            // Nee, uitstellen
     }
-    if ( stat_1uur == NULL )                                // Ruimte geallocceerd?
-    {
-      continue ;
-    }
-    timing = 0 ;                                            // Ja, reset timer
-    myseconds += cycletime ;                                // Interne klok bijhouden
     claimData ( "savetask" ) ;
-    pIn = rtdata[PWIN].value ;                              // Gemeten (P1) netto vermogen
-    pOut = ctdata[DOUT].value + ctdata[COUT].value  ;       // Uitgestuurde vermogen (één van de twee is nul)
-    soc = rtdata[SOC].value ;                               // Batterij lading in procent
-    stat_10sec[inx_10sec].pIn = pIn ;                       // Ja, bewaar gegevens in stat_10sec
-    stat_10sec[inx_10sec].pOut = pOut ;
-    stat_10sec[inx_10sec].soc = soc ;                       // Lading van de batterij in procent
-    tel_1min_pIn  += pIn ;                                  // Sommeer pIn t.b.v. minuut gemiddelde
-    tel_10min_pIn += pIn ;                                  // Sommeer pIn t.b.v. 10 minuten gemiddelde
-    tel_1uur_pIn  += pIn ;                                  // Sommeer pIn t.b.v. uur gemiddelde
-    tel_1min_pOut  += pOut ;                                // Sommeer pOut t.b.v. minuut gemiddelde
-    tel_10min_pOut += pOut ;                                // Sommeer pOut t.b.v. 10 minuten gemiddelde
-    tel_1uur_pOut  += pOut ;                                // Sommeer pOut t.b.v. uur gemiddelde
-    tel_1min_soc  += soc ;                                  // Sommeer soc t.b.v. minuut gemiddelde
-    tel_10min_soc += soc ;                                  // Sommeer soc t.b.v. 10 minuten gemiddelde
-    tel_1uur_soc  += soc ;                                  // Sommeer soc t.b.v. uur gemiddelde
-    if ( ++inx_10sec == STATSIZ )                           // Update de pointer
+    pIn  = rtdata[PWIN].value ;                             // Gemeten (P1) netto vermogen
+    pOut = ctdata[DOUT].value - ctdata[COUT].value  ;       // Uitgestuurde vermogen (één van de twee is nul)
+    soc  = rtdata[SOC].value ;                              // Batterij lading in procent
+    for ( tinx = SEC10 ; tinx <= UUR1 ; tinx++ )            // Ga de grafieken af
     {
-      inx_10sec = 0 ;
-    }
-    if ( myseconds % 60 == 0 )                              // 1 minuut voorbij?
-    {
-      sf = 60 / cycletime ;                                 // Ja, aantal meetpunten gesampled
-      stat_1min[inx_1min].pIn  = tel_1min_pIn  / sf ;       // Bewaar gegevens
-      stat_1min[inx_1min].pOut = tel_1min_pOut / sf ;
-      stat_1min[inx_1min].soc  = tel_1min_soc  / sf ;
-      tel_1min_pIn  = 0 ;                                   // Sommen weer op 0
-      tel_1min_pOut = 0 ;
-      tel_1min_soc  = 0 ;
-      if ( ++inx_1min == STATSIZ )                          // Update de pointer
+      stats1_t* g = &statistics.soort[tinx] ;               // Het gaat om deze
+      g->sum_pIn  += pIn ;                                  // Sommeer voor gemiddelde pIn
+      g->sum_pOut += pOut ;                                 // Sommeer voor gemiddelde pOut
+      g->sum_soc  += soc ;                                  // Sommeer voor gemiddelde soc
+      g->sumpoints++ ;                                      // Tel aantal punten
+      if ( ( myseconds % seconds[tinx] ) == 0 )             // Tijd om gemiddelde te berekenen?
       {
-        inx_1min = 0 ;
-      }
-    }
-    if ( myseconds % 600 == 0 )                             // 10 minuut voorbij?
-    {
-      sf = 600 / cycletime ;                                // Ja, aantal meetpunten gesampled
-      stat_10min[inx_10min].pIn  = tel_10min_pIn  / sf ;    // Bewaar gegevens
-      stat_10min[inx_10min].pOut = tel_10min_pOut / sf ;
-      stat_10min[inx_10min].soc  = tel_10min_soc  / sf ;
-      tel_10min_pIn  = 0 ;                                   // Sommen weer op 0
-      tel_10min_pOut = 0 ;
-      tel_10min_soc  = 0 ;
-      if ( ++inx_10min == STATSIZ )                          // Update de pointer
-      {
-        inx_10min = 0 ;
-      }
-    }
-    if ( myseconds % 3600 == 0 )                            // 1 uur voorbij?
-    {
-      sf = 3600 / cycletime ;                               // Ja, aantal meetpunten gesampled
-      stat_1uur[inx_1uur].pIn  = tel_1uur_pIn  / sf ;       // Bewaar gegevens
-      stat_1uur[inx_1uur].pOut = tel_1uur_pOut / sf ;
-      stat_1uur[inx_1uur].soc  = tel_1uur_soc  / sf ;
-      tel_1uur_pIn  = 0 ;                                   // Sommen weer op 0
-      tel_1uur_pOut = 0 ;
-      tel_1uur_soc  = 0 ;
-      if ( ++inx_1uur == STATSIZ )                          // Update de pointer
-      {
-        inx_1uur = 0 ;
+        g->buf[g->inx].pIn  = g->sum_pIn  / g->sumpoints ;  // Bereken gemiddelde pIn en sla op
+        g->buf[g->inx].pOut = g->sum_pOut / g->sumpoints ;  // Bereken gemiddelde pOut en sla op
+        g->buf[g->inx].soc  = g->sum_soc  / g->sumpoints ;  // Bereken gemiddelde soc en sla op
+        g->sum_pIn  = 0 ;                                   // Reset sommen van middeling
+        g->sum_pOut = 0 ;
+        g->sum_soc  = 0 ;
+        g->sumpoints = 0 ;                                  // Reset ook de teller
+        if ( ++g->inx >= STATSIZ )                          // Verhoog pointer
+        {
+          g->inx = 0 ;                                      // Round robin
+        }
       }
     }
     releaseData() ;                                         // Geef datagebied weer vrij
@@ -2666,21 +2657,18 @@ void setup()
   {
     psb = ESP.getPsramSize() ;                              // Haal hoeveelheid psram op (ex logregels)
     dbglines = (logregel_t*)ps_malloc(sizeof(logregel_t)) ; // Maak ruimte voor logregels in psram
-    uint16_t nbytes = sizeof(statinfo_t) * STATSIZ ;        // Size of statistic buffer
-    stat_10sec = (statinfo_t*)ps_malloc ( nbytes ) ;        // Allocate the buffers for statistic data
-    stat_1min  = (statinfo_t*)ps_malloc ( nbytes ) ;
-    stat_10min = (statinfo_t*)ps_malloc ( nbytes ) ;
-    stat_1uur  = (statinfo_t*)ps_malloc ( nbytes ) ;
-    memset ( stat_10sec, 0, nbytes ) ;                      // Clear 10 seconds buffer
-    memset ( stat_1min,  0, nbytes ) ;                      // Clear 1 minuut buffer
-    memset ( stat_10min, 0, nbytes ) ;                      // Clear 10 minuten buffer
-    memset ( stat_1uur,  0, nbytes ) ;                      // Clear 1 uur buffer
   }
   dbgprint ( "Start " NAME ", version %s",                  // Show start-up info
              VERSION ) ;
   dbgprint ( "Gecompileerd: %s %s local time",              // Show compile time
              __DATE__, __TIME__ ) ;
   dbgprint ( "Beschikbare hoeveelheid Psram is %d", psb ) ; // Toon hoeveelheid Psram
+  if ( statistics.valid != VALIDDATA )                      // Statistieken in RTC geheugen okay?
+  {
+    dbgprint ("Statistieken gewist" ) ;
+    memset ( &statistics, 0, sizeof(statistics) ) ;         // Nee, maak statistieken leeg
+    statistics.valid = VALIDDATA ;                          // Maak valide
+  }
   xmaintask = xTaskGetCurrentTaskHandle() ;                 // My taskhandle
   if ( !SPIFFS.begin ( FSIF ) )                             // Mount and test SPIFFS
   {
@@ -2709,6 +2697,10 @@ void setup()
     else if ( strcmp ( ps->label, "spiffs" ) == 0 )       // Is this the SPIFFS partition?
     {
       spiffs = ps ;                                       // Yes, remember SPIFFS partition
+    }
+    else if ( strcmp ( ps->label, "coredump" ) == 0 )     // Is this the coredump partition?
+    {
+      coredump = ps ;                                     // Yes, remember coredump partition
     }
     pi = esp_partition_next ( pi ) ;                      // Find next
   }
