@@ -37,8 +37,9 @@
 // 09-04-2025, ES: Correctie bug in ophalen dongle data via http, schaalfactor voor energie.        *
 // 10-04-2025, ES: Initiële WiFi credentials verwacht in coredump partition.                        *
 // 11-04-2025, ES: Correctie registratie van batterij opladen.  Statistieken in RTC geheugen.       *
+// 15-04-2025, ES: Clean-up.  Configuratie van AP password erbij.                                   *
 //***************************************************************************************************
-#define VERSION     "Fri, 11 Apr 2025 14:45:00 GMT"       // Current version
+#define VERSION     "Tue, 15 Apr 2025 12:20:00 GMT"       // Current version
 
 #include <Arduino.h>
 #include <soc/soc.h>                    // For brown-out detector setting
@@ -93,6 +94,8 @@
 
 #define STATSIZ           100                             // Aantal punten in de statinfo_t buffers
 #define VALIDDATA         0xFA1500FF                      // Code voor valid data in statistieken
+#define CDSECRET          "VenusSecret$777"               // Code voor valid data in coredump partition
+
 
 //***************************************************************************************************
 // Forward declarations.                                                                            *
@@ -151,6 +154,7 @@ struct stats0_t                                 // De 4 statistiekbuffers (10sec
 {
   int32_t  valid ;                              // Voor testen validiteit na reset
   stats1_t soort[4] ;                           // Dit zijn de 4 statistieken
+  time_t   lasttime[4] ;                        // Tijdstip van laatste meting
 } ;
 
 
@@ -161,14 +165,14 @@ struct stats0_t                                 // De 4 statistiekbuffers (10sec
 int                DEBUG = 1 ;                          // Debug on/off
 //
 bool               have_psram = false ;                 // Neem aan: geen psram
-const char*        fixedwifi = "" ;                     // Used for FIXEDWIFI option
 const char*        emptyWifiCred = "myssid/mypasswd" ;  // Credentials indien er geen echte zijn
-String             lssid, lpw ;                         // SSID and password from nvs or FIXEDWIFI
-char               netname[32] = NAME ;                 // Unieke nodenaam, bijvoorbeeld voor AP
+String             lssid, lpw ;                         // SSID and password from nvs
+char               nodename[32] = NAME ;                // Unieke nodenaam, bijvoorbeeld voor AP
+String             APpassword ;                         // Password bij Accesspoint mode
 bool               NetworkFound = false ;               // True if WiFi network connected in STA mode
 char               json_buf[2048] ;                     // Result from P1
 char*              json_begin = json_buf ;              // Begin JSON in json_buf
-char               controltext[128] ;                   // Status van controltask, dit is een tekst
+char               controltext[128] ;                   // Status van controltask als een tekst
 char               controlmod[4] = "nom";               // Controller mode, "stb", "nom", "off" of "man"
 int                man_setpoint ;                       // Setpoint in manual mode
 int                RS485_pin_rx = RS485PINRX ;          // Default pin for RX of RS485 Serial port
@@ -198,7 +202,7 @@ WiFiClient         otaclient ;                          // For OTA update vanaf 
 bool               http_reponse_flag = false ;          // Response required
 String             http_getcmd ;                        // Contents of last GET command
 String             http_rqfile ;                        // Requested file
-HardwareSerial*    RS485serial = NULL ;                 // Serial port for RS485 Modbus connection
+HardwareSerial*    RS485serial = nullptr ;              // Serial port for RS485 Modbus connection
 TaskHandle_t       xmaintask ;                          // Taskhandle for main task
 TaskHandle_t       xMBtask ;                            // Task handle for lezen/schrijven modbus
 TaskHandle_t       xreadP1task ;                        // Task handle for lezen dongle
@@ -206,10 +210,10 @@ TaskHandle_t       xcontroltask ;                       // Task handle for contr
 TaskHandle_t       xsavetask ;                          // Task handle vor save statistical data
 EventGroupHandle_t taskEvents ;                         // Events for triggering various tasks
 uint16_t           xwificount = 0 ;                     // Loop counter for P1 communication task
-SemaphoreHandle_t  dbgsem = NULL ;                      // For exclusive usage of dbgprint
-SemaphoreHandle_t  datasem = NULL ;                     // For exclusive access to real-time data
-SemaphoreHandle_t  MBsem = NULL ;                       // For exclusive modbus usage
-hw_timer_t*        timer = NULL ;                       // For timer
+SemaphoreHandle_t  dbgsem ;                             // For exclusive usage of dbgprint
+SemaphoreHandle_t  datasem ;                            // For exclusive access to real-time data
+SemaphoreHandle_t  MBsem ;                              // For exclusive modbus usage
+hw_timer_t*        timer ;                              // For timer
 uint16_t           wdcount = 0 ;                        // Counter for watchdog timer
 String             updhost = UPDATEHOST ;               // Default host to update software from WiFi
 uint8_t            mac[6] ;                             // Key in POST data (mac address)
@@ -238,8 +242,6 @@ uint16_t           mqttport_em = 1883 ;                 // Poort voor MQTT energ
 String             mqttuser_em ;                        // User for MQTT energiemeter authentication
 String             mqttpasswd_em ;                      // Password for MQTT energiemeter authentication
 
-
-const esp_partition_t*    spiffs = nullptr ;            // Pointer to SPIFFS partition struct
 const esp_partition_t*    coredump = nullptr ;          // Pointer naar WiFi info in coredump
 const esp_partition_t*    nvs = nullptr ;               // Pointer to NVS partition struct
 esp_err_t                 nvserr ;                      // Error code from nvs functions
@@ -424,7 +426,6 @@ void obtain_time()
 {
   time_t             tnow = 0 ;                                 // Wordt de tijd van timeserver
   const char*        timezone ;                                 // Timezone voor nederland 
-  struct tm          timeinfo = { 0 } ;                         // Gesplitst in delen
   int                retry = 30 ;                               // Teller aantal maal proberen
   sntp_sync_status_t stat ;                                     // Sync status
 
@@ -600,7 +601,7 @@ bool mqttreconnect()
              mqttuser_em.c_str(),
              mqttpasswd_em.c_str(),
              mqttcount ) ;
-  res = mqttclient_em.connect ( netname,                  // Connect to broker
+  res = mqttclient_em.connect ( nodename,                 // Connect to broker
                                 mqttuser_em.c_str(),      // Met deze user
                                 mqttpasswd_em.c_str() ) ; // Met dit password
   if ( ! res )
@@ -655,7 +656,7 @@ void WiFiEvent ( WiFiEvent_t event )
 //**************************************************************************************************
 //                                      S E T W I F I C R E D                                      *
 //**************************************************************************************************
-// Set the SSID and password from the entry in preferences or FIXEDWIFI.                           *
+// Set the SSID and password from the entry in preferences.                                        *
 // Will be called only once by setup().                                                            *
 //**************************************************************************************************
 void  setWifiCred()
@@ -663,46 +664,21 @@ void  setWifiCred()
   String      buf ;                                       // "SSID/password"
   int         inx ;                                       // Place of "/"
   const char* key = "wifi" ;
-  char        coredumpbuf[128] ;                          // Ruimte voor data uit coredump partition
 
-  buf = String ( "" ) ;                                   // Clear buffer with ssid/passwd
-  if ( *fixedwifi )                                       // FIXEDWIFI set and not empty?
-  {
-    buf = String ( fixedwifi ) ;                          // Ja, neem over
-  }
-  if ( nvssearch ( key ) )                                // Ook specificatie in preferences?
+  buf = String ( emptyWifiCred ) ;                        // Neem aan: een fantasie netwerk
+  if ( nvssearch ( key ) )                                // WiFi credentials in NVS?
   {
     buf = nvsgetstr ( key ) ;                             // Ja, neem over
-    if ( strcmp ( buf.c_str(), emptyWifiCred ) == 0 )     // Nog onbekend?
-    {
-      buf = String ( "" ) ;                               // Ja, maak leeg
-    }
   }
-  if ( buf.isEmpty() && ( coredump != nullptr ) )         // Nog steeds niet gedefinieerd?
+  else
   {
-    if ( esp_partition_read ( coredump, 0, coredumpbuf,   // Lees een daael van de coredump partitie
-                              sizeof(coredumpbuf) ) == ESP_OK )
-    {
-      if ( strcmp ( coredumpbuf,                          // Staan er credentials in coredump (van Esptool)?
-                    "VenusSecret$777" ) == 0 )
-      {
-        buf = String ( coredumpbuf + 16 ) ;               // Ja, probeer die
-        dbgprint ( "Initiële WiFi credentials %s "
-                   "gevonden",
-                   buf.c_str() ) ;
-      }
-    }
-  }
-  if ( buf.isEmpty() )                                    // Nog steeds leeg?
-  {
-    buf = String ( emptyWifiCred ) ;                      // Ja, dan toch maar een fantasie netwerk
+    nvssetstr ( "wifi", buf ) ;                           // Zorg voor een gevulde key in NVS
   }
   inx = buf.indexOf ( "/" ) ;                             // Zoek scheiding tussen ssid en password
   if ( inx > 0 )                                          // Scheiding gevonden?
   {
     lpw = buf.substring ( inx + 1 ) ;                     // Ja, isoleer password
     lssid = buf.substring ( 0, inx ) ;                    // Is nu SSID
-    nvssetstr ( "wifi", buf ) ;
   }
 }
 
@@ -742,13 +718,18 @@ bool connectwifi()
   }
   if ( localAP )                                        // Lokaal AP opzetten?
   {
+    if ( APpassword.isEmpty() )                         // Exotisch password opgegeven?
+    {
+      APpassword = nodename ;                           // Nee, gebruik default (=nodename)
+    }
     dbgprint ( "WiFi verbinding mislukt!  "             // Toon het probleem
                "Probeer AP op te zetten met"
                " naam %s en password %s.",
-               netname, netname ) ;
+               nodename, APpassword.c_str() ) ;
     WiFi.disconnect ( true ) ;                          // After restart the router could
     WiFi.softAPdisconnect ( true ) ;                    // still keep the old connection
-    if ( ! WiFi.softAP ( netname, netname ) )           // This ESP will be an AP
+    if ( ! WiFi.softAP ( nodename,                      // This ESP will be an AP
+                         APpassword.c_str() ) )
     {
       dbgprint ( "AP opzetten mislukt" ) ;              // Setup of AP failed
     }
@@ -793,12 +774,11 @@ void chomp ( String &str )
 //**************************************************************************************************
 // Read data registers from modbus.                                                                *
 // Registers are 2 bytes, big endian.                                                              *
-// Na ontvangst van de reply wachte we even om ervoor te zorgen dat de requests niet te snel       *
+// Na ontvangst van de reply wachten we even om ervoor te zorgen dat de requests niet te snel      *
 // achter elkaar komen.                                                                            *
 //**************************************************************************************************
 bool get_modbus_data_regs()
 {
-  uint8_t     res ;                                               // Result modbus functions
   bool        fres = true ;                                       // Function result, assume positive
   uint8_t     i ;                                                 // Loop control
   uint16_t    regnr ;                                             // Register te lezen
@@ -806,7 +786,6 @@ bool get_modbus_data_regs()
   uint16_t    n ;                                                 // Aantal register te lezen, 1 = 16 bits woord
   int32_t     value32 ;                                           // Gelezen waarde, 32 bits
   const char* TAG = "get_modbus_data_regs" ;                      // Voor debugging semaphore
-  const char* err ;                                               // Modbus error code
 
   if ( simul )                                                    // Aan het simuleren?
   {
@@ -885,8 +864,7 @@ bool put_modbus_data_regs ( bool was_timeout )
   uint16_t    regnr ;                                             // Register te lezen
   uint16_t    value ;                                             // Gelezen waarde
   const char* TAG = "put_modbus_data_regs" ;                      // Voor debugging semaphore
-  const char* err ;                                               // Modbus error code
-
+  
   if ( simul )                                                    // Simulatie?
   {
     return true ;                                                 // Ja, gauw klaar
@@ -1179,7 +1157,7 @@ bool read_p1_dongle_http()
     {
       json_buf[bread] = '\0' ;                                  // Zorg voor delimeter
       json_begin = strstr ( json_buf, "{" ) ;                   // Wijs naar begin van de json string
-      if ( json_begin == NULL )
+      if ( json_begin == nullptr )
       {
         dbgprint ( "JSON begint niet met een acculade!" ) ;     // Geen begin gevonden
         return false ;
@@ -1660,6 +1638,7 @@ const char* analyzeCmd ( const char* str )
 //   mbget_xxx                    // Get Modbus real-time register. Example: mbget_u32=2202        *
 //   mbset_xxx                    // Set Modbus R/W register. Example: mbset_u32=41200,0           *
 //   mincharge                    // Minimale laad/ontlaad vermogen, default 100W.                 *
+//   appassword                   // Password indie AP wordt aangemaakt, default is nodename.      *
 //**************************************************************************************************
 const char* analyzeCmd ( const char* par, const char* val )
 {
@@ -1765,6 +1744,10 @@ const char* analyzeCmd ( const char* par, const char* val )
     {
       minCharge = ivalue ;                            // Redelijke waarde overnemen
     }
+  }
+  else if ( argument == "appassword" )                // Password bij accesspoint mode
+  {
+    APpassword = value ;                              // Ja, neem over
   }
   else if ( argument == "test" )                      // Test command
   {
@@ -1971,18 +1954,35 @@ bool nvssearch ( const char* key )
 //**************************************************************************************************
 //                                    I N I T P R E F S                                            *
 //**************************************************************************************************
-// Initialize NVS with defaults for some parameters.                                               *
-// This only happens if the NVS is totally blank.                                                  *
+// Initialiseer de NVS met defaults voor enkele parameters.                                        *
+// Dit gebeurt alleen bij de eerste start, indien de NVS nog helemaal leeg is.                     *
+// Bij het flashen kan er in de "coredump" partitie al een key voor de wifi credentials aanwezig   *
+// zijn.  Die nemen we dan over, de credentials staan vanaf positie 16.                            *
 //**************************************************************************************************
 void initprefs()
 {
+  char        coredumpbuf[128] ;                                // Ruimte voor data uit coredump partition
+  String      buf = emptyWifiCred ;                             // "SSID/password"
+
   nvsclear() ;                                                  // Erase all keys
   nvssetstr ( "v_firmware",   ""                  ) ;
   nvssetstr ( "v_webintf",    ""                  ) ;
-  nvssetstr ( "dongle",       "P1_Dongle_Pro"     ) ;
-  nvssetstr ( "dongle_api",   "/api/v2/sm/actual" ) ;
-  nvssetstr ( "dongle_host",  "192.168.1.54"      ) ;
-  nvssetstr ( "wifi",         emptyWifiCred       ) ;
+  nvssetstr ( "dongle",       "P1_Dongle_Pro"     ) ;           // Als voorbeeld een P1_Dongle_pro
+  nvssetstr ( "dongle_host",  "192.168.1.54"      ) ;           // Met een voorbeeld IP adres
+  if ( coredump != nullptr )                                    // Is er een coredump partitie?
+  {
+    if ( esp_partition_read ( coredump, 0, coredumpbuf,         // Ja, lees een deel van die partitie
+                              sizeof(coredumpbuf) ) == ESP_OK )
+    {
+      if ( strcmp ( coredumpbuf, CDSECRET ) == 0 )              // Staan er credentials in coredump (van Esptool)?
+      {
+        buf = String ( coredumpbuf + 16 ) ;                     // Ja, probeer die
+        dbgprint ( "WiFi credentials %s gevonden",              // Toon in logging
+                   coredumpbuf + 16 ) ;
+      }
+    }
+  }
+  nvssetstr ( "wifi", buf ) ;
 }
 
 
@@ -2018,7 +2018,6 @@ void handle_getjson ( AsyncWebServerRequest *request )
 void handle_getgraph ( AsyncWebServerRequest *request )
 {
   AsyncWebServerResponse *response ;                        // Response on request
-  int                    encodedlength ;                    // Lengte van ge codeerde string
   uint16_t               statslen ;                         // Lengte van de te versturen data
   String                 encoded ;                          // Result base64 encode
   base64                 b64c ;                             // Base64 object
@@ -2026,6 +2025,7 @@ void handle_getgraph ( AsyncWebServerRequest *request )
   const uint8_t*         graph ;                            // Wijs naar 1 van de 3 grafieken
   int                    inx ;                              // Index in één van de 3 grafieken
   int                    tinx = SEC10 ;                     // SEC10, MIN1, MIN10 of UUR1
+  uint64_t               t ;                                // Tijd van laatste meting
 
   graphName =request->arg ( "t" ) ;                         // Welke grafiek is gewenst?
   //dbgprint ( "HTTP get graph %s", graphName.c_str() ) ;   // Show request
@@ -2037,14 +2037,15 @@ void handle_getgraph ( AsyncWebServerRequest *request )
   {
     tinx = MIN1 ;                                           // Het gaat om deze grafiek
   }
-  else if ( graphName == "10min" )                               // 100 x 10 minuten?
+  else if ( graphName == "10min" )                          // 100 x 10 minuten?
   {
     tinx = MIN10 ;                                          // Het gaat om deze grafiek
   }
-  else if ( graphName == "1uur" )                                // 100 x 1 uur?
+  else if ( graphName == "1uur" )                           // 100 x 1 uur?
   {
     tinx = UUR1 ;                                           // Het gaat om deze grafiek
   }
+  t = (uint64_t) statistics.lasttime[tinx] ;                // Pak tijdstip laatste meting
   graph = (const uint8_t*)statistics.soort[tinx].buf ;      // Pointer naar de juiste grafiek
   inx = statistics.soort[tinx].inx ;                        // Pak bijbehorende index
   statslen = sizeof(stats2_t) * STATSIZ ;                   // Lengte van de te coderen data
@@ -2055,6 +2056,7 @@ void handle_getgraph ( AsyncWebServerRequest *request )
                         "text/plain",
                         encoded ) ;
   response->addHeader ( "Index", inx ) ;                    // Current index in array
+  response->addHeader ( "tijd", String ( t ) ) ;            // Voeg tijdstip laaste meteing toe
   request->send ( response ) ;                              // Stuur de response
 }
 
@@ -2477,6 +2479,7 @@ void savetask ( void * parameter )
         g->sum_pOut = 0 ;
         g->sum_soc  = 0 ;
         g->sumpoints = 0 ;                                  // Reset ook de teller
+        statistics.lasttime[tinx] = time(nullptr) ;         // Zet tijdstip van de meting                      
         if ( ++g->inx >= STATSIZ )                          // Verhoog pointer
         {
           g->inx = 0 ;                                      // Round robin
@@ -2627,7 +2630,7 @@ void controltask ( void * parameter )
 //**************************************************************************************************
 void setup()
 {
-  const char*               partname = "nvs" ;              // Partition with NVS info
+  const esp_partition_t*    spiffs = nullptr ;              // Pointer to SPIFFS partition struct
   char                      macstr[17+1] ;                  // Mac address as string
   esp_partition_iterator_t  pi ;                            // Iterator for partition_find()
   const esp_partition_t*    ps ;                            // Pointer to partition struct
@@ -2690,7 +2693,7 @@ void setup()
                "gevonden op 0x%06X, "
                "%8d bytes",
                ps->label, ps->address, ps->size ) ;
-    if ( strcmp ( ps->label, partname ) == 0 )            // Is this the NVS partition?
+    if ( strcmp ( ps->label, "nvs" ) == 0 )               // Is this the NVS partition?
     {
       nvs = ps ;                                          // Yes, remember NVS partition
     }
@@ -2704,18 +2707,10 @@ void setup()
     }
     pi = esp_partition_next ( pi ) ;                      // Find next
   }
-  #ifdef FIXEDWIFI                                        // Set fixedwifi if defined
-    fixedwifi = FIXEDWIFI ;
-  #endif
-  if ( nvs == nullptr )
+  if ( ( nvs == nullptr ) || ( spiffs == nullptr ) )      // Check essentiële partities
   {
-    dbgprint ( "Partitie %s niet gevonden!", partname ) ; // Very unlikely...
-    while ( true ) ;                                      // Impossible to continue
-  }
-  if ( spiffs == nullptr )
-  {
-    dbgprint ( "Partitie spiffs niet gevonden!" ) ;       // Very unlikely...
-    while ( true ) ;                                      // Impossible to continue
+    dbgprint ( "Partitie probleem! " ) ;                  // Zeer onwaarschijnlijk...
+    while ( true ) ;                                      // Niet doorgaan
   }
   fillkeylist() ;                                         // Fill keynames with all keys
   readprefs ( false ) ;                                   // Read preferences
@@ -2744,7 +2739,7 @@ void setup()
   sprintf ( macstr, MACSTR,                               // Convert to a string (lower case)
             MAC2STR ( mac ) ) ;
   dbgprint ( "ESP32 mac address is %s", macstr ) ;        // Show mac address
-  sprintf ( netname, "Venus_%02X%02X",                    // Create AP net name, like "Venus_67AB"
+  sprintf ( nodename, "Venus_%02X%02X",                   // Create AP node name, like "Venus_67AB"
                      mac[5],
                      ( mac[4] + mac[0] ) & 0xFF) ;
   NetworkFound = connectwifi() ;                          // Connect to WiFi network
@@ -2754,7 +2749,7 @@ void setup()
     obtain_time() ;                                       // Ja, synchroniseer de klok
   }
   int mdnsTry = 5 ;                                       // Initialize mDNS
-  while ( !MDNS.begin ( netname ) && mdnsTry-- > 0 )
+  while ( !MDNS.begin ( nodename ) && mdnsTry-- > 0 )
   {
     dbgprint ( "Start start mdns %d", mdnsTry ) ;         // No success yet
     delay ( 1000 ) ;

@@ -24,7 +24,6 @@ bool p1_simul_handle()
 {
   static int8_t simIndex = 0 ;                              // Index in simPower
   static int8_t simTimer = 0 ;                              // Timer voor 40 seconden
-  float         curWatt ;                                   // Vermogen deze stap
 
   claimData ( "P1" ) ;                                      // Claim data gebied
   rtdata[PWIN].value = simPower[simIndex] -                 // Bepaal levering of opwek
