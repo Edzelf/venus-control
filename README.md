@@ -30,11 +30,19 @@ Ontwikkkeling:
 * 04-03-2025 - Uitgebreid getest.  Print ontworpen en besteld bij PCBWay.
 * 13-03-2025 - Print gereed. Duurtest gestart.
 * 20-03-2025 - Uitbreiding met handmatige instelling.
-* 25-03-2025 - Betere ModBus driver. Ondersteuning voor Homewizard P1 dongle (ONGETEST).
+* 25-03-2025 - Betere ModBus driver. Ondersteuning voor Homewizard P1 dongle.
 * 08-04-2025 - Energie meting via MQTT.  Instelling voor kW of Watt meting.
 * 10-04-2025 - Eenvoudig flashen van de software via webbrowser inclusief preset van WiFi credentials.
 
+Printontwerp:
+De print is ontworpen en febrabriceerd in samenwerking met PCBWay.  PCBWay is bekend om zijn uitstekende kwaliteit en zeer snelle levering.  De gefabriceerde print ziet er zo uit:
+
+![image](https://github.com/user-attachments/assets/1456eb45-89a0-4ce3-8583-d6aa8df0ffdf)
+Na montage van de onderdelen ziet het er zo uit:
+
+![image](https://github.com/user-attachments/assets/35b91f00-dbfa-4109-9661-561494a5d8fc)
+
+Aangesloten op de Marstek kabel ziet het er zo uit:
+
 ![image](https://github.com/user-attachments/assets/3c637cd9-2cd4-4d71-962b-d980cc887dc8)
 
-
- 
