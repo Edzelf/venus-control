@@ -64,8 +64,8 @@
       strokeColor: '#E0E0E0',   // to see which ones work best for you
       staticZones:
       [
-        { strokeStyle: "#F00000", min: -800, max: 0 }, // Red from 100 to 130
-        { strokeStyle: "#00F000", min: 0, max: 2400 }, // Green
+        { strokeStyle: "#F00000", min: 0, max: 900 },    // Red from 0 to 900
+        { strokeStyle: "#00F000", min: -2500, max: 0 },  // Green
       ],
       renderTicks:
       {
@@ -81,7 +81,7 @@
       staticLabels:
       {
         font: "10px sans-serif",  // Specifies font
-        labels: [ -800, -400, 0, 400, 800, 1200, 1600, 2000, 2400 ],  // Print labels at these values
+        labels: [ -2400, -2000, -1600, -1200, -800, -400, 0, 400, 800 ],  // Print labels at these values
         color: "#000000",         // Optional: Label text color
         fractionDigits: 0         // Optional: Numerical precision. 0=round off.
       },
@@ -124,9 +124,9 @@
     }
     var targetg1 = document.getElementById ( 'canvas-gauge-id1' ) ;
     gauge1 = new Gauge ( targetg1 ).setOptions ( opts_1 ) ; // create sexy gauge!
-    gauge1.maxValue = 2400 ;              // set max gauge value
-    gauge1.setMinValue ( -800 ) ;         // set min value
-    gauge1.set ( 1250 ) ;                 // set actual value
+    gauge1.maxValue = 800 ;               // set max gauge value
+    gauge1.setMinValue ( -2400 ) ;        // set min value
+    gauge1.set ( -1250 ) ;                // set actual value
 
     var targetg2 = document.getElementById ( 'canvas-gauge-id2' ) ;
     gauge2 = new Gauge ( targetg2 ).setOptions ( opts_2 ) ; // create sexy gauge!
@@ -173,7 +173,7 @@
    {
     g1_str.value = "Batterij in stand-by modus" ;
    }
-   gauge1.set ( -pOut ) ;                   // Gauge altijd updaten
+   gauge1.set ( pOut ) ;                   // Gauge altijd updaten
    gauge2.set ( soc ) ;
   }
 

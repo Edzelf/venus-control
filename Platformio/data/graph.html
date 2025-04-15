@@ -26,6 +26,12 @@
   </tr>
   <tr>
     <td>
+      Negatieve waarde voor de blauwe lijn betekent teruglevering van opgewekt vermogen.<br>
+      Negatieve waarde voor de zwarte lien betekent laden van de batterij.
+    </td>
+  </tr>
+  <tr>
+    <td>
      <input type="radio" id="k1" name="gt" value="10sec" onclick="radioclick('10sec')">
      <label for="k1">Registratie per 10 seconden</label><br>
      <input type="radio" id="k2" name="gt" value="1min" onclick="radioclick('1min')">
@@ -38,16 +44,16 @@
   </tr>
  </table>
  <br><br>
- <!-- <input type="text" id="statstr" size="80" > -->
+ <!-- <input type="text" id="statstr" size="80"> -->
 </center>
 
 <script>
 
 var t = "10sec" ;                                               // Type grafiek 10sec, 1min of 1uur
-var refrIntv = 20000 ;                                          // Refresh interval
 var graphTitle ;                                                // Titel boven in grafiek
 var xscaletext = "Tijdstip (sec)";                              // Tekst bij x-as
 var xscale = 10 ;                                               // Schaal unit 1 of 10
+
 
 function radioclick(a)
 {
@@ -68,7 +74,6 @@ function checkRadio()
     t = "10sec" ;                                       // Set graph type naar 10sec
     xscaletext = "Tijdstip (sec)";                      // Tekst bij x-as
     xscale = 10 ;                                       // Schaal unit 1
-    refrIntv = 20000 ;                                  // En pas refresh tijd aan
     graphTitle = "Venus regeling laatste 16 minuten" ;  // Pas titel aan
 
   }
@@ -76,24 +81,21 @@ function checkRadio()
   {
     t = "1min" ;                                        // Set graph type naar 1 minuut
     xscaletext = "Tijdstip (min)";                      // Tekst bij x-as
-    xscale = 1 ;                                        // Schaal unit 1
-    refrIntv = 60000 ;                                  // En pas refresh tijd aan
+    xscale = 60 ;                                       // Schaal unit 1
     graphTitle = "Venus regeling laatste 100 minuten" ; // Pas titel aan
   }
   if ( k3.checked )
   {
     t = "10min" ;                                       // Set graph type naar 10 minuten
     xscaletext = "Tijdstip (minuten)";                  // Tekst bij x-as
-    xscale = 10 ;                                       // Schaal unit 10
-    refrIntv = 600000 ;                                 // En pas refresh tijd aan
+    xscale = 600 ;                                      // Schaal unit 10
     graphTitle = "Venus regeling laatste 16 uur" ;      // Pas titel aan
   }
   if ( k4.checked )
   {
     t = "1uur" ;                                        // Set graph type naar 1 uur
     xscaletext = "Tijdstip (uur)";                      // Tekst bij x-as
-    xscale = 1 ;                                        // Schaal unit 1
-    refrIntv = 3600000 ;                                // En pas refresh tijd aan
+    xscale = 3600 ;                                     // Schaal unit 1
     graphTitle = "Venus regeling laatste 4 dagen" ;     // Pas titel aan
   }
 }
@@ -127,9 +129,12 @@ function myRefresh()
       var pIn, pOut, soc ;                                    // Variabelen uit array
       var b0, b1, b2, b3, b4, b5 ;
       const input = xhr.responseText ;
+      var dtnow ;
+
       inx = xhr.getResponseHeader ( "Index" ) ;               // Haal waarde van header "Index"
+      dtnow = Number ( xhr.getResponseHeader ( "tijd" ) ) ;   // Haal tijdstip laatste meting uit header
       ib = inx * 8 ;                                          // 8 characters per meting
-      ib = ib & 0xFFF8 ;                                      // Rare bug corrigeren
+      ib = ib & 0xFFF8 ;                                      // Rare bug corrigeren?
       for ( let k = 0 ; k < STATSIZ ; k++ )                   // Ga alle punten langs
       {
         // We verwachten van Javascript geen 64 bits precisie, dus 48 bits verdelen over 2 variabelen.
@@ -162,10 +167,21 @@ function myRefresh()
         pOut = ( b3 << 8 ) | b2 ;                             // Vorm 2e 16 bits unsigned word
         if ( pOut > 32768 ) pOut -= 65536 ;                   // Correctie voor negatieve getallen
         soc  = b4 ;                                           // Pak laatste 8 bits byte
-        var lab = ( k - STATSIZ ) * xscale ;                  // label per 1 of 10 metingen
+        let now = new Date ( ( dtnow + ( k - STATSIZ ) * xscale ) * 1000 ) ;
+        let fth = now.getHours() ;
+        let ftm = now.getMinutes() ;
+        let fts = now.getSeconds() ;
+        if ( fth < 10 ) fth = "0" + fth ;
+        if ( ftm < 10 ) ftm = "0" + ftm ;
+        if ( fts < 10 ) fts = "0" + fts ;
+        let lab = fth + ":" + ftm ;
+        if ( t == "10sec" )                                   // Seconden tonen?
+        {
+          lab += ( ":" + fts ) ;                              // Ja, voeg seconden toe
+        }
         if ( soc != 0 )                                       // soc is nul bij ongemeten punten; overslaan
         {
-          AddNewData ( pIn, -pOut, soc, lab ) ;               // Zet in grafiek
+          AddNewData ( pIn, pOut, soc, lab ) ;                // Zet in grafiek
         }
       }
       myLineChart.update() ;
@@ -180,7 +196,6 @@ function myRefresh()
   {
     console.log ( "Error: " + e ) ; 
   }
-  setInterval ( myRefresh, refrIntv ) ;
 }
 
 
@@ -244,7 +259,7 @@ var chconfig = {
           display: true,
           scaleLabel: {
             display: true,
-            labelString: 'Tijdstip[sec]'
+            labelString: 'Tijdstip'
           }
         }],
         yAxes: [{
@@ -274,6 +289,7 @@ checkRadio() ;
 var ctx = document.getElementById ( 'canvas-chart' ).getContext ( '2d' ) ;
 var myLineChart = new Chart ( ctx, chconfig ) ;
 myRefresh() ;
+setInterval ( myRefresh, 60000 ) ;
 </script>
 </body>
 </html>
