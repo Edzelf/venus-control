@@ -27,10 +27,12 @@
  <img src="logo.png" alt="Venus logo"><br>
  <table>
   <tr>
-   <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id1"></canvas></td>
+   <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id0"></canvas> </td>
+   <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id1"></canvas> </td>
    <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id2"></canvas></td>
   </tr>
   <tr>
+    <td bgcolor="#b0b3b7"><input type="text" id="g0_str" size="30" ></td>
     <td bgcolor="#b0b3b7"><input type="text" id="g1_str" size="30" ></td>
     <td bgcolor="#b0b3b7"><input type="text" id="g2_str" size="30" ></td>
   </tr>
@@ -49,6 +51,43 @@
 
   function onloadfunc()
   {
+    var opts_0 =
+    {
+      angle: 0.03,              // The span of the gauge arc
+      radiusScale: 1.0,
+      lineWidth: 0.44,          // The line thickness
+      pointer:
+      {
+        length: 0.7,            // Relative to gauge radius
+        strokeWidth: 0.035      // The thickness
+      },
+      colorStart: '#6FADCF',    // Colors
+      colorStop: '#8FC0DA',     // just experiment with them
+      strokeColor: '#E0E0E0',   // to see which ones work best for you
+      staticZones:
+      [
+        { strokeStyle: "#00F000", min: -3000, max: 0 },   // Green for returned energy
+        { strokeStyle: "#F00000", min: 0, max: 3000 },    // Red for delivered energy
+      ],
+      renderTicks:
+      {
+        divisions: 6,
+        divWidth: 1.6,
+        divLength: 0.5,
+        divColor: '#080D33',
+        subDivisions: 2,
+        subLength: 0.2,
+        subWidth: 1.2,
+        subColor: '#66641D'
+      },
+      staticLabels:
+      {
+        font: "10px sans-serif",  // Specifies font
+        labels: [ -3000, -2000, -1000, 0, 1000, 2000, 3000 ],  // Print labels at these values
+        color: "#000000",         // Optional: Label text color
+        fractionDigits: 0         // Optional: Numerical precision. 0=round off.
+      },
+    } ;
     var opts_1 =
     {
       angle: 0.03,              // The span of the gauge arc
@@ -122,6 +161,12 @@
         fractionDigits: 0                               // Numerical precision. 0=round off.
       },
     }
+    var targetg0 = document.getElementById ( 'canvas-gauge-id0' ) ;
+    gauge0 = new Gauge ( targetg0 ).setOptions ( opts_0 ) ; // create sexy gauge!
+    gauge0.maxValue = 3000 ;              // set max gauge value
+    gauge0.setMinValue ( -3000 ) ;        // set min value
+    gauge0.set ( 0 ) ;                    // set actual value
+
     var targetg1 = document.getElementById ( 'canvas-gauge-id1' ) ;
     gauge1 = new Gauge ( targetg1 ).setOptions ( opts_1 ) ; // create sexy gauge!
     gauge1.maxValue = 800 ;               // set max gauge value
@@ -138,7 +183,7 @@
     window.myLine = new Chart ( ctx, chconfig ) ;
   }
 
-  function AddNewData(temp)               // Paremeters zijn 2 temperaturen, gescheiden door "|"
+  function AddNewData()
   {
    var pIn, pOut ;
    var now = new Date() ;
@@ -160,6 +205,7 @@
    chconfig.data.datasets[1].data.push ( pOut ) ;
    chconfig.options.title.text = "Venus regeling " + "\"" + mode + "\"";
    window.myLine.update() ;
+   g0_str.value = "Netto energie verbruik " + pIn + "W" ;
    g2_str.value = "Batterij gevuld voor " + soc + "%" ;
    if ( pOut < 0 )
    {
@@ -173,7 +219,8 @@
    {
     g1_str.value = "Batterij in stand-by modus" ;
    }
-   gauge1.set ( pOut ) ;                   // Gauge altijd updaten
+   gauge0.set ( pIn ) ;                    // Gauge altijd updaten
+   gauge1.set ( pOut ) ;
    gauge2.set ( soc ) ;
   }
 

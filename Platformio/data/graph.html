@@ -27,7 +27,7 @@
   <tr>
     <td>
       Negatieve waarde voor de blauwe lijn betekent teruglevering van opgewekt vermogen.<br>
-      Negatieve waarde voor de zwarte lien betekent laden van de batterij.
+      Negatieve waarde voor de zwarte lijn betekent laden van de batterij.
     </td>
   </tr>
   <tr>
@@ -52,7 +52,7 @@
 var t = "10sec" ;                                               // Type grafiek 10sec, 1min of 1uur
 var graphTitle ;                                                // Titel boven in grafiek
 var xscaletext = "Tijdstip (sec)";                              // Tekst bij x-as
-var xscale = 10 ;                                               // Schaal unit 1 of 10
+var xscale = 10 ;                                               // Schaal unit 10, 60, 600, 3600
 
 
 function radioclick(a)
@@ -167,7 +167,7 @@ function myRefresh()
         pOut = ( b3 << 8 ) | b2 ;                             // Vorm 2e 16 bits unsigned word
         if ( pOut > 32768 ) pOut -= 65536 ;                   // Correctie voor negatieve getallen
         soc  = b4 ;                                           // Pak laatste 8 bits byte
-        let now = new Date ( ( dtnow + ( k - STATSIZ ) * xscale ) * 1000 ) ;
+        let now = new Date ( ( dtnow + ( k - STATSIZ + 1 ) * xscale ) * 1000 ) ;
         let fth = now.getHours() ;
         let ftm = now.getMinutes() ;
         let fts = now.getSeconds() ;
