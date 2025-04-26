@@ -50,34 +50,20 @@ void onMqttMessage ( char* topic, byte* payload, unsigned int len )
 //**************************************************************************************************
 //                                P 1 _ M Q T T _ I N I T                                          *
 //**************************************************************************************************
-// Set server en subscribe topics voor power- in en uit.                                           *
+// Set subscribe topics voor power-delivered en power-returned.                                    *
 //**************************************************************************************************
 void p1_mqtt_init()
 {
-  bool     res ;                                            // Resultaat van subscribe
-  uint16_t inx1 ;                                           // Index in mqtt_em
-  uint16_t inx2 ;                                           // Index in mqtt_em
-  String   broker ;                                         // IP of domeinnaam van de broker
+  bool     res = true  ;                                    // Resultaat van subscribe
 
-  mqtt_on = true ;                                          // Enable MQTT
-  if ( ( inx1 = mqtt_em.indexOf ( ":" ) ) >= 0  )           // Zoek scheiding tussen username en password
+  if ( ! field_pIn.isEmpty() )
   {
-    mqttuser_em = mqtt_em.substring ( 0, inx1++ ) ;         // Set username, set index op begin password
-    //dbgprint ( "user is %s", mqttuser_em.c_str() ) ;
-    if ( ( inx2 = mqtt_em.indexOf ( "@" ) ) > inx1 )        // Zoek scheiding tussen username en password
-    {
-      mqttpasswd_em = mqtt_em.substring ( inx1, inx2 ) ;  	// Set password
-      //dbgprint ( "pw is %s", mqttpasswd_em.c_str() ) ;
-      broker = mqtt_em.substring ( ++inx2 ) ;               // Set domein of IP van de broker
-      //dbgprint ( "broker is %s", broker.c_str() ) ;
-    }
+    res |= mqttclient.subscribe ( field_pIn.c_str() ) ;     // Subscribe to MQTT, "power delivered" topic
   }
-  mqttclient_em.setServer ( broker.c_str(),                 // Specificeer de broker
-                            mqttport_em ) ;                 // En de poort
-  mqttclient_em.setCallback ( onMqttMessage ) ;             // Set callback on receive
-  mqttreconnect() ;                                         // Conect to broker
-  res = mqttclient_em.subscribe ( field_pIn.c_str() ) &&    // Subscribe to MQTT, "power delivered" topic
-        mqttclient_em.subscribe ( field_pOut.c_str() ) ;    // Subscribe to MQTT, "power returned" topic
+  if ( ! field_pOut.isEmpty() )
+  {
+    res |= mqttclient.subscribe ( field_pOut.c_str() ) ;    // Subscribe to MQTT, "power returned" topic
+  }
   if ( !res )
   {
     dbgprint ( "MQTT subscribe fout!" ) ;                   // Failure
@@ -97,13 +83,13 @@ bool p1_mqtt_handle()
 
   if ( once )                                                 // Nog initialiseren?
   {
-    p1_mqtt_init() ;                                          // Ja, doe dat dan
+    p1_mqtt_init() ;                                          // Ja, subscribe to topics
     once = false ;                                            // En daarna nooit meer
   }
   claimData ( "P1" ) ;                                        // Claim data gebied
   if ( data_ok )
   {
-    rtdata[PWIN].value = ( p1 - p2 ) * 1000.0 ;               // Bewaar netto vermogen in Watt
+    rtdata[PWIN].value = ( p1 - p2 ) * dongle_schaal ;        // Bewaar netto vermogen in Watt
   }
   releaseData() ;                                             // Geef data gebied weer vrij
   return data_ok ;                                            // Geef resultaat terug

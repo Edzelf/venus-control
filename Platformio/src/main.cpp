@@ -38,8 +38,9 @@
 // 10-04-2025, ES: Initiële WiFi credentials verwacht in coredump partition.                        *
 // 11-04-2025, ES: Correctie registratie van batterij opladen.  Statistieken in RTC geheugen.       *
 // 15-04-2025, ES: Clean-up.  Configuratie van AP password erbij.                                   *
+// 16-04-2025, ES: Publiceer MQTT data.                                                             *
 //***************************************************************************************************
-#define VERSION     "Tue, 15 Apr 2025 12:20:00 GMT"       // Current version
+#define VERSION     "Tue, 22 Apr 2025 06:55:00 GMT"       // Current version
 
 #include <Arduino.h>
 #include <soc/soc.h>                    // For brown-out detector setting
@@ -185,11 +186,11 @@ bool               modbusOkay = false ;                 // False if Modbus error
 String             ipaddress ;                          // Own IP-address
 AsyncWebServer     cmdserver ( 80 ) ;                   // Instance of embedded webserver, port 80
 WiFiClient         P1_client ;                          // TCP client for P1-dongle connection
-WiFiClient         wmqttclient_em ;                     // Instance voor mqtt energiemeter
-PubSubClient       mqttclient_em ( wmqttclient_em ) ;   // Client for MQTT subscriber
+WiFiClient         wmqttclient ;                        // Instance voor mqtt, publicatie data
+PubSubClient       mqttclient ( wmqttclient ) ;         // Client for MQTT subscriber data
 String             dongle ;                             // Type (naam) P1-dongle
 String             dongle_host ;                        // Hostnaam of IP-adres van P1-dongle
-String             mqtt_em ;                            // Username, password, broker voor energie meter
+String             mqtt ;                               // Username, password voor MQTT broker
 String             field_pIn ;                          // Field/topic Power delivered voor JSON/MQTT
 String             field_pOut ;                         // Field/topic Power returned voor JSON/MQTT
 u_int16_t          dongle_port = 80 ;                   // TCP Port voor de api, default 80
@@ -238,9 +239,9 @@ int8_t             clk_dst = 1 ;                        // Number of hours shift
 logregel_t*        dbglines ;                           // Array met laatste logregels
 uint16_t           dbglinx = 0 ;                        // Index in dbglines
 bool               mqtt_on = false ;                    // MQTT in use
-uint16_t           mqttport_em = 1883 ;                 // Poort voor MQTT energiemeter, default 1883
-String             mqttuser_em ;                        // User for MQTT energiemeter authentication
-String             mqttpasswd_em ;                      // Password for MQTT energiemeter authentication
+uint16_t           mqttport = 1883 ;                    // Poort voor MQTT energiemeter, default 1883
+String             mqttuser ;                           // User for MQTT energiemeter authentication
+String             mqttpasswd ;                         // Password for MQTT energiemeter authentication
 
 const esp_partition_t*    coredump = nullptr ;          // Pointer naar WiFi info in coredump
 const esp_partition_t*    nvs = nullptr ;               // Pointer to NVS partition struct
@@ -553,10 +554,10 @@ void releaseMb()
 //                                        B U I L D J S O N                                        *
 //**************************************************************************************************
 // Maak een JSON string met de besturingsvariabelen.                                               *
+// Het resultaat wordt in de buffer gezet die als paramater wordt meegegeven.                      *
 //**************************************************************************************************
-const char* buildJSON()
+void buildJSON ( char* bjbuf, int16_t len )
 {
-  static char  bjbuf[512] ;                               // Space for the output string
   JsonDocument doc ;                                      // JSON structuur
   int          inx = 0 ;                                  // Index in JSON structuur
   
@@ -570,8 +571,7 @@ const char* buildJSON()
   doc["Controller mode"] = controlmod ;                   // Ook modus (nom,man,stb,off)
   doc["Manual setpoint"] = man_setpoint ;                 // En handmatig setpoint
   releaseData() ;
-  serializeJsonPretty ( doc, bjbuf, sizeof(bjbuf) ) ;     // Maak er een string van
-  return bjbuf ;                                          // Geef een mooie structuur terug
+  serializeJsonPretty ( doc, bjbuf, len ) ;               // Maak er een string van
 }
 
 
@@ -598,16 +598,16 @@ bool mqttreconnect()
   }
   mqttcount++ ;                                           // Count the retries
   dbgprint ( "MQTT (Re)connect %s %s, %d keer",           // Show some debug info
-             mqttuser_em.c_str(),
-             mqttpasswd_em.c_str(),
+             mqttuser.c_str(),
+             mqttpasswd.c_str(),
              mqttcount ) ;
-  res = mqttclient_em.connect ( nodename,                 // Connect to broker
-                                mqttuser_em.c_str(),      // Met deze user
-                                mqttpasswd_em.c_str() ) ; // Met dit password
+  res = mqttclient.connect ( nodename,                    // Connect to broker
+                             mqttuser.c_str(),            // Met deze user
+                             mqttpasswd.c_str() ) ;       // Met dit password
   if ( ! res )
   {
     dbgprint ( "MQTT connect fout, rc=%d!",
-               mqttclient_em.state() ) ;
+               mqttclient.state() ) ;
   }
   return res ;
 }
@@ -766,6 +766,41 @@ void chomp ( String &str )
     str.remove ( inx ) ;                              // Yes, remove
   }
   str.trim() ;                                        // Remove spaces and CR
+}
+
+
+//**************************************************************************************************
+//                                      M Q T T _ I N I T                                          *
+//**************************************************************************************************
+// Initialiseer de MQTT broker.                                                                    *
+// Wordt gedaan als er in de configuratie een definitie is voor "mqtt = ...".                      *
+//**************************************************************************************************
+void mqtt_init()
+{
+  uint16_t inx1 ;                                           // Index in mqtt
+  uint16_t inx2 ;                                           // Index in mqtt
+  String   broker ;                                         // IP of domeinnaam van de broker
+
+  mqtt_on = true ;                                          // Enable MQTT
+  if ( ( inx1 = mqtt.indexOf ( ":" ) ) >= 0  )              // Zoek scheiding tussen username en password
+  {
+    mqttuser = mqtt.substring ( 0, inx1++ ) ;               // Set username, set index op begin password
+    //dbgprint ( "user is %s", mqttuser.c_str() ) ;
+    if ( ( inx2 = mqtt.indexOf ( "@" ) ) > inx1 )           // Zoek scheiding tussen username en password
+    {
+      mqttpasswd = mqtt.substring ( inx1, inx2 ) ;        	// Set password
+      //dbgprint ( "pw is %s", mqttpasswd.c_str() ) ;
+      broker = mqtt.substring ( ++inx2 ) ;                  // Set domein of IP van de broker
+      //dbgprint ( "broker is %s", broker.c_str() ) ;
+    }
+  }
+  mqttclient.setServer ( broker.c_str(), mqttport ) ;       // Specificeer de broker en de poort
+  if ( ! mqttclient.setBufferSize ( 512 ) )                 // Vergroot de buffer
+  {
+    dbgprint ( "MQTT setbuffersize mislukt!" ) ;            // Maar dat lukt niet
+  }
+  mqttclient.setCallback ( onMqttMessage ) ;                // Set callback on receive
+  mqttreconnect() ;                                         // Connect to broker
 }
 
 
@@ -1622,7 +1657,7 @@ const char* analyzeCmd ( const char* str )
 //   dongle_schaal                // 1000 voor kW, 1 voor Watt in de API                           *
 //   field_pin                    // Field/topic Power delivered voor JSON/MQTT                    *
 //   field_pout                   // Field/topic Power returned voor JSON/MQTT                     *
-//   mqtt_em                      // User, password en broker-IP van MQTT energiemeter             *
+//   mqtt                         // User, password en broker-IP van MQTT energiemeter             *
 //   test                         // For test purposes                                             *
 //   simul                        // 1 for modbus simulation                                       *
 //   reset                        // Restart the ESP32                                             *
@@ -1690,9 +1725,9 @@ const char* analyzeCmd ( const char* par, const char* val )
   {
     dongle_schaal = ivalue ;                          // Ja, set factor 1000 of 1
   }
-  else if ( argument == "mqtt_em" )                   // Gegevens voor MQTT van de energiemeter?
+  else if ( argument.startsWith ( "mqtt" ) )          // Gegevens voor MQTT?
   {
-    mqtt_em = value ;                                 // Ja, zet gegevens klaar
+    mqtt = value ;                                    // Ja, zet gegevens klaar
   }
   else if ( argument == "field_pin" )                 // JSON item of MQTT topic voor power delivered?
   {
@@ -1990,11 +2025,15 @@ void initprefs()
 //                                  H A N D L E _ G E T S T A T U S                                *
 //**************************************************************************************************
 // Called from index page to display proces data.                                                  *
+// De string met JSON wordt in een buffer gezet die exclusief voor deze functie is.                *
 //**************************************************************************************************
 void handle_getStatus ( AsyncWebServerRequest *request )
 {
+  static char bjstat[512] ;                                 // Buffer met JSON string 
+
   //dbgprint ( "HTTP get status" ) ;                        // Show request
-  request->send ( 200, "text/json", buildJSON() ) ;         // Send the reply
+  buildJSON ( bjstat, sizeof(bjstat ) ) ;                   // Format de JSON
+  request->send ( 200, "text/json", bjstat ) ;              // Stuur als reply
 }
 
 
@@ -2213,7 +2252,7 @@ void handle_logging ( AsyncWebServerRequest *request )
   const char*            reply = "No logging available" ;
   const int              parnr = 0 ;                // Eerste parameter is interessant
 
-  dbgprint ( "HTTP toon logging verzoek" ) ;
+  //dbgprint ( "HTTP toon logging verzoek" ) ;
   if ( ! dbglines )                                 // Hebben we een buffer met logregels?
   {
     request->send ( 200, "text/plain", reply ) ;    // Nee, stuur error reply
@@ -2426,8 +2465,8 @@ void readP1task ( void * parameter )
     // We komen hier na een trigger, maar ook elke 10 msec
     if ( mqtt_on )
     {
-      mqttclient_em.loop() ;                                    // Onderhouden van MQTT connectie
-      if ( !mqttclient_em.connected() )                         // Test of er een verbinding is
+      mqttclient.loop() ;                                       // Onderhouden van MQTT connectie
+      if ( !mqttclient.connected() )                            // Test of er een verbinding is
       {
         mqttreconnect() ;                                       // Nee, reconnect
       }
@@ -2439,7 +2478,8 @@ void readP1task ( void * parameter )
 //**************************************************************************************************
 //                                     S A V E T A S K                                             *
 //**************************************************************************************************
-// Proces dat de data bewaard voor de satistieken.                                                 *
+// Proces dat de data bewaart voor de satistieken.                                                 *
+// Ook wordt er data gestuurd naar MQTT indien geconfigureerd.                                     *
 // De timing wordt gedaan via een event vanuit de timer, elke seconde.                             *
 //**************************************************************************************************
 void savetask ( void * parameter )
@@ -2447,8 +2487,9 @@ void savetask ( void * parameter )
   int             tinx ;                                    // Grafiek nummer
   const  uint16_t cycletime = 10 ;                          // Cycle time in seconden
   const  int16_t  seconds[] = { 10, 60, 600, 3600 } ;       // Interval per grafiek
-  static uint32_t myseconds = -1 ;                          // Interne klok
+  uint32_t        myseconds = -1 ;                          // Interne klok
   int16_t         pIn, pOut, soc ;                          // Te registreren vermogens
+  char            mqjbuf[512] ;                             // Ruimte voor geformatte JSON string
 
   dbgTaskInfo() ;                                           // Toon info
   while ( true )
@@ -2458,6 +2499,15 @@ void savetask ( void * parameter )
     if ( ++myseconds % cycletime )                          // Tijd voor actie (10, 20, 30, enz.)?
     {
       continue ;                                            // Nee, uitstellen
+    }
+    if ( mqtt_on )
+    {
+      buildJSON ( mqjbuf, sizeof(mqjbuf) ) ;                // Format de JSON string
+      if ( ! mqttclient.publish ( nodename, mqjbuf ) )      // Publiceer algemene data
+      {
+        dbgprint ( "MQTT publish mislukt, buffersize is %d!",
+                   mqttclient.getBufferSize() ) ;
+      }
     }
     claimData ( "savetask" ) ;
     pIn  = rtdata[PWIN].value ;                             // Gemeten (P1) netto vermogen
@@ -2518,7 +2568,6 @@ void controltask ( void * parameter )
     pOut_old = rtdata[SETBC].value ;                        // Huidige setting
     pIn = rtdata[PWIN].value ;                              // Haal huidige input van grid
     pOut = pIn + pOut_old ;                                 // Benodigde ontlaad capaciteit (indien positief)
-    //pOut = ( pOut_old + pOut * 2 ) / 3 ;                  // Beetje filteren
     ctdata[CM485].value = MODBUS_ENABLE ;                   // Neem aan dat RS485 sturing mag
     // Kijk of er handmatige setting is.
     if ( strstr ( controlmod, "stb" ) )                     // Manual stand-by?
@@ -2585,6 +2634,7 @@ void controltask ( void * parameter )
         stop = true ;                                       // Dus stoppen
       }
     }
+    pOut = ( pOut_old + pOut * 3 ) / 4 ;                    // Beetje filteren
     if ( stop )                                             // Stoppen met sturen?
     {
       pOut = 0 ;                                            // Ja, dus niets doen
@@ -2738,10 +2788,11 @@ void setup()
   esp_wifi_get_mac ( WIFI_IF_STA, mac ) ;                 // MAC address if in STA mode
   sprintf ( macstr, MACSTR,                               // Convert to a string (lower case)
             MAC2STR ( mac ) ) ;
-  dbgprint ( "ESP32 mac address is %s", macstr ) ;        // Show mac address
   sprintf ( nodename, "Venus_%02X%02X",                   // Create AP node name, like "Venus_67AB"
-                     mac[5],
-                     ( mac[4] + mac[0] ) & 0xFF) ;
+            mac[5],
+            ( mac[4] + mac[0] ) & 0xFF) ;
+  dbgprint ( "Node %s, mac address is %s",                // Show nodename en mac address
+             nodename, macstr ) ;
   NetworkFound = connectwifi() ;                          // Connect to WiFi network
   if ( NetworkFound )                                     // Is er een netwerk?
   {
@@ -2776,7 +2827,7 @@ void setup()
     xTaskCreatePinnedToCore (
       MBtask,                                             // Task to read ModBus registers.
       "MBtask",                                           // Name of task.
-      4000,                                               // Stack size of task
+      3000,                                               // Stack size of task
       NULL,                                               // parameter of the task
       2,                                                  // priority of the task
       &xMBtask,                                           // Task handle to keep track of created task
@@ -2800,11 +2851,15 @@ void setup()
     xTaskCreatePinnedToCore (
       savetask,                                           // Task to save statistcal data
       "savetask",                                         // Name of task.
-      2000,                                               // Stack size of task
+      3400,                                               // Stack size of task
       NULL,                                               // parameter of the task
       2,                                                  // priority of the task
       &xsavetask,                                         // Task handle to keep track of created task
       0 ) ;                                               // Run on CPU 0
+    }
+    if ( ! mqtt.isEmpty() )                               // MQTT in gebruik?
+    {
+      mqtt_init() ;                                       // Ja, maak connectie met broker
     }
   delay ( 1000 ) ;                                        // 
   dbgprint ( "Einde setup") ;
