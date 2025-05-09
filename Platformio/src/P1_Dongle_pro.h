@@ -1,6 +1,7 @@
 // P1_Dongle_pro.h
 // Module om data uit de JSON van deze dongle te halen.
 // De dongle wordt geleverd door "smart-stuff.nl".
+// Software is te downloaden via https://install.smart-stuff.nl/p1u/
 // De api is bereikbaar via http://<ip>/api/v2/sm/actual
 // Connect gaat soms fout als er ook andere apparaten via WiFi contact maken met de dongle.
 // Het levert een JSON op die er zo uitziet:
@@ -72,7 +73,7 @@ bool p1_dongle_pro_handle()
     claimData ( "P1" ) ;                                        // Claim data gebied
     p1 = json_doc[field_pIn.c_str()]["value"] ;                 // Bepaal netto vermogen (grid naar huis)
     p2 = json_doc[field_pOut.c_str()]["value"]  ;               // Beide zijn in kW
-    rtdata[PWIN].value = ( p1 - p2 ) * 1000.0 ;                 // Bewaar netto vermogen in Watt
+    rtdata[PWIN].value = ( p1 - p2 ) * dongle_schaal ;          // Bewaar netto vermogen in Watt
     releaseData() ;
     return true ;                                               // Geef data gebied weer vrij
   }

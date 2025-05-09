@@ -138,12 +138,12 @@ bool Vmodbus::readHRegisters ( uint16_t regnr, uint8_t nwords )
        ( xmitbuf[1] != 0x03 ) ||                // Klopt de functiecode?
        ( CRC ( xmitbuf, brec - 2 ) != true ) )  // Klopt de checksum?
   {
-    Serial.printf ( "MB read: n is %d\n", n ) ;
-    if ( n > 0 )
-    {
-      Serial.printf ( "MB read:<%02X><%02X><%02X><%02X><%02X><%02X><%02X>\n", 
-                      xmitbuf[0], xmitbuf[1], xmitbuf[2], xmitbuf[3], xmitbuf[4], xmitbuf[5], xmitbuf[6] ) ;
-    }
+    // Serial.printf ( "MB read: n is %d\n", n ) ;
+    // if ( n > 0 )
+    // {
+    //   Serial.printf ( "MB read:<%02X><%02X><%02X><%02X><%02X><%02X><%02X>\n", 
+    //                   xmitbuf[0], xmitbuf[1], xmitbuf[2], xmitbuf[3], xmitbuf[4], xmitbuf[5], xmitbuf[6] ) ;
+    // }
     return false ;                              // Nee, error!
   }
   p = xmitbuf + 3 ;                             // Wijs naar eerste registerinhoud
@@ -231,12 +231,12 @@ bool Vmodbus::writeHRegister ( uint16_t regnr, uint16_t word )
        ( xmitbuf[1] != 0x06 ) ||                  // Klopt de functiecode?
        ( CRC ( xmitbuf, reclen - 2 ) != true ) )  // Klopt de checksum?
   {
-    Serial.printf ( "MB write: n is %d\n", n ) ;
-    if ( n > 0 )
-    {
-      Serial.printf ( "MB write:<%02X><%02X><%02X><%02X><%02X><%02X>\n", 
-                      xmitbuf[0], xmitbuf[1], xmitbuf[2], xmitbuf[3], xmitbuf[4], xmitbuf[5] ) ;
-    }
+    // Serial.printf ( "MB write: n is %d\n", n ) ;
+    // if ( n > 0 )
+    // {
+    //   Serial.printf ( "MB write:<%02X><%02X><%02X><%02X><%02X><%02X>\n", 
+    //                   xmitbuf[0], xmitbuf[1], xmitbuf[2], xmitbuf[3], xmitbuf[4], xmitbuf[5] ) ;
+    // }
     return false ;                                // Nee, error!
   }
   return true ;

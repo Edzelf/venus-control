@@ -39,9 +39,12 @@
 // 11-04-2025, ES: Correctie registratie van batterij opladen.  Statistieken in RTC geheugen.       *
 // 15-04-2025, ES: Clean-up.  Configuratie van AP password erbij.                                   *
 // 16-04-2025, ES: Publiceer MQTT data.                                                             *
+// 03-05-2025, ES: Correctie manual setpoint in MQTT.                                               *
+// 07-05-2025, ES: Correctie disconnected MQTT broker.                                              *
 //***************************************************************************************************
-#define VERSION     "Tue, 22 Apr 2025 06:55:00 GMT"       // Current version
+#define EDTEST false
 
+#define VERSION     "Fri, 09 May 2025 11:15:00 GMT"       // Current version
 #include <Arduino.h>
 #include <soc/soc.h>                    // For brown-out detector setting
 #include <soc/rtc_cntl_reg.h>           // For brown-out detector setting
@@ -118,7 +121,7 @@ const char* analyzeCmd ( const char* par, const char* val ) ;
 bool        read_p1_dongle_http() ;
 void        claimData ( const char* p ) ;
 void        releaseData() ;
-bool        mqttreconnect() ;
+bool        mqttreconnect ( bool force ) ;
 
 
 
@@ -239,6 +242,7 @@ int8_t             clk_dst = 1 ;                        // Number of hours shift
 logregel_t*        dbglines ;                           // Array met laatste logregels
 uint16_t           dbglinx = 0 ;                        // Index in dbglines
 bool               mqtt_on = false ;                    // MQTT in use
+bool               mqtt_ok = false ;                    // MQTT connectie is in ordel
 uint16_t           mqttport = 1883 ;                    // Poort voor MQTT energiemeter, default 1883
 String             mqttuser ;                           // User for MQTT energiemeter authentication
 String             mqttpasswd ;                         // Password for MQTT energiemeter authentication
@@ -267,7 +271,7 @@ enum sw_ireg_nr { SOC, ACPW, INVST,                     // State of charge, AC p
                   CHGCC, DISCC,                         // Charging cutoff capacity, discharging cutoff capacity
                   MAXCHG, MAXDIS,                       // Max charge power, max discharge power
                   PWIN, CURBC, SETBC,                   // Power in, current batterij charge, setpoint battery charge
-                  ERRCNT                                // Error count
+                  ERRCNT, UPTIME                        // Error count, uptime (seconds)
 } ;
 
 struct RTInfo_t                                         // Structure of Real-time input data
@@ -284,7 +288,7 @@ struct RTInfo_t                                         // Structure of Real-tim
 
 RTInfo_t rtdata[] =                                     // Real-time data from Venus
 {
-    { 32104,   u16, "SOC",                 10, 10,  1,   25 },     // SOC    - State of charge in procenten, bijv 14
+    { 32104,   u16, "SOC",                 10, 10,  1,   52 },     // SOC    - State of charge in procenten, bijv 14
     { 32202,   s32, "AC power bat",         5,  5,  1,    0 },     // ACPW   - AC power into the grid, bijv -198
     { 35100,   u16, "Inverter-state",       5,  5,  1,    0 },     // INVST  - Inverters state 0..5
     { 44000,   u16, "Charge cutoff",       20, 20, 10,   90 },     // CHGCC  - Charging cutoff capacity 80..100%
@@ -293,8 +297,9 @@ RTInfo_t rtdata[] =                                     // Real-time data from V
     { 44003,   u16, "max discharge power", 20, 20,  1,  800 },     // MAXDIS - Max discharge power 200..5000W
     {     0, undef, "Power in",            -1, -1,  1,    0 },     // PWIN   - Power in (P1) (negatief is power uit)
     { 32102,   s32, "Laadt met",            5,  5,  1,    0 },     // CURBC  - Huidig vermogen opladen (negatief is ontladen)
-    {     0, undef, "Setpoint",            -1, -1,  1,    0 },     // SETBC  - Setpint laden/ontladen batterij
+    {     0, undef, "Setpoint",            -1, -1,  1,    0 },     // SETBC  - Setpoint laden/ontladen batterij
     {     0, undef, "Fout teller",         -1, -1,  1,    0 },     // ERRCNT - Errorcount
+    {     0, undef, "Uptime",              -1, -1,  1,    0 },     // UPTIME - Uptime in seconden
 } ;
 
 #define NUMIREGS ( sizeof(rtdata) / sizeof(rtdata[0]) )
@@ -452,7 +457,7 @@ void obtain_time()
     tzset() ;                                                   // Switch naar deze zone
     time ( &tnow ) ;                                            // Haal tijd op
     localtime_r ( &tnow, &timeinf ) ;                           // Splits
-    dbgprint ( "Verbinding met NTP gelukt!" ) ;
+    dbgprint ( "Verbinding met NTP gelukt" ) ;
   }
   else
   {
@@ -562,6 +567,7 @@ void buildJSON ( char* bjbuf, int16_t len )
   int          inx = 0 ;                                  // Index in JSON structuur
   
   claimData ( "buildJSON" ) ;                             // Exclusieve toegang
+  rtdata[UPTIME].value = seconds ;                        // Zet uptime in rtdata
   for ( inx = 0 ; inx < NUMIREGS ; inx++ )                // Ga alle variabelen langs
   {
     int tmp = rtdata[inx].value ;                         // Get data als integer
@@ -569,45 +575,77 @@ void buildJSON ( char* bjbuf, int16_t len )
   }
   doc["Controller tekst"] = controltext ;                 // Vul extra key/value pair
   doc["Controller mode"] = controlmod ;                   // Ook modus (nom,man,stb,off)
-  doc["Manual setpoint"] = man_setpoint ;                 // En handmatig setpoint
+  doc["Manual setpoint"] = String ( man_setpoint ) ;      // En handmatig setpoint
   releaseData() ;
   serializeJsonPretty ( doc, bjbuf, len ) ;               // Maak er een string van
 }
 
 
 //**************************************************************************************************
+//                                P 1 _ M Q T T _ I N I T                                          *
+//**************************************************************************************************
+// Set subscribe topics voor power-delivered en power-returned.                                    *
+// De topic namen zijn configureerbaar.                                                            *
+//**************************************************************************************************
+void p1_mqtt_init()
+{
+  bool     res = true  ;                                    // Resultaat van subscribe
+
+  if ( ! field_pIn.isEmpty() )
+  {
+    res && mqttclient.subscribe ( field_pIn.c_str() ) ;     // Subscribe to MQTT, "power delivered" topic
+  }
+  if ( ! field_pOut.isEmpty() )
+  {
+    res && mqttclient.subscribe ( field_pOut.c_str() ) ;    // Subscribe to MQTT, "power returned" topic
+  }
+  if ( !res )
+  {
+    dbgprint ( "MQTT subscribe fout!" ) ;                   // Failure
+  }
+}
+
+
+
+//**************************************************************************************************
 //                                    M Q T T R E C O N N E C T                                    *
 //**************************************************************************************************
-// Reconnect to broker.                                                                            *
+// Maak een (nieuwe) connectie met de broker.                                                      *
+// Indien force == true, dan wordt de re-connectie altijd gedaan.                                   *
 //**************************************************************************************************
-bool mqttreconnect()
+bool mqttreconnect ( bool force )
 {
-  static uint32_t retrytime = 0 ;                         // Limit reconnect interval
-  static uint16_t mqttcount = 0 ;                         // Counter MAXMQTTCONNECTS
-  bool            res = false ;                           // Connect result
+  static uint32_t retrytime = 0 ;                         // Limiteer reconnect interval
+  static uint16_t mqttcount = 0 ;                         // Teller MAXMQTTCONNECTS
+  bool            res = false ;                           // Connect resultaat
 
-  if ( ( millis() - retrytime ) < 5000 )                  // Don't try to frequently
+  if ( ! force && ( ( millis() - retrytime ) < 5000 ) )   // Echt doen?
   {
-    return res ;
+    return true ;                                         // Nee, return okay status
   }
-  retrytime = millis() ;                                  // Set time of last try
-  if ( mqttcount > MAXMQTTCONNECTS )                      // Tried too much?
+  retrytime = millis() ;                                  // Set tijdstip laatste poging
+  if ( mqttcount > MAXMQTTCONNECTS )                      // Genoeg pogingen?
   {
-    mqtt_on = false ;                                     // Yes, switch off forever
+    mqtt_on = false ;                                     // JA, uit voor altijd
+    mqtt_ok = false ;
+    dbgprint ( "MQTT give-up!" ) ;
     return res ;                                          // and quit
   }
   mqttcount++ ;                                           // Count the retries
-  dbgprint ( "MQTT (Re)connect %s %s, %d keer",           // Show some debug info
-             mqttuser.c_str(),
-             mqttpasswd.c_str(),
-             mqttcount ) ;
   res = mqttclient.connect ( nodename,                    // Connect to broker
                              mqttuser.c_str(),            // Met deze user
                              mqttpasswd.c_str() ) ;       // Met dit password
-  if ( ! res )
+  if ( res )
   {
-    dbgprint ( "MQTT connect fout, rc=%d!",
-               mqttclient.state() ) ;
+    dbgprint ( "MQTT connectie %d gelukt", mqttcount ) ;
+    mqttcount = 0 ;                                       // Okay, reset errorcount
+    mqtt_ok = true ;
+    p1_mqtt_init() ;                                      // Init P1_MQTT energiemeter
+  }
+  else
+  {
+    dbgprint ( "MQTT connectie %d fout, rc=%d!",          // Fout, toon dat
+               mqttcount, mqttclient.state() ) ;
   }
   return res ;
 }
@@ -702,7 +740,7 @@ bool connectwifi()
       localAP = false ;                                 // Ja, dus we maken geen AP
       break ;
     }
-    if ( ( trycount++ % 10 ) == 0 )                     // Elke 10 seconden een recoonect doen
+    if ( ( trycount++ % 10 ) == 0 )                     // Elke 10 seconden een reconnect doen
     {
       WiFi.reconnect() ;                                // Misschien helpt dat
     }
@@ -794,13 +832,13 @@ void mqtt_init()
       //dbgprint ( "broker is %s", broker.c_str() ) ;
     }
   }
-  mqttclient.setServer ( broker.c_str(), mqttport ) ;       // Specificeer de broker en de poort
   if ( ! mqttclient.setBufferSize ( 512 ) )                 // Vergroot de buffer
   {
     dbgprint ( "MQTT setbuffersize mislukt!" ) ;            // Maar dat lukt niet
   }
+  mqttclient.setServer ( broker.c_str(), mqttport ) ;       // Specificeer de broker en de poort
   mqttclient.setCallback ( onMqttMessage ) ;                // Set callback on receive
-  mqttreconnect() ;                                         // Connect to broker
+  mqttreconnect ( true ) ;                                  // Connect to broker
 }
 
 
@@ -822,7 +860,7 @@ bool get_modbus_data_regs()
   int32_t     value32 ;                                           // Gelezen waarde, 32 bits
   const char* TAG = "get_modbus_data_regs" ;                      // Voor debugging semaphore
 
-  if ( simul )                                                    // Aan het simuleren?
+  if ( simul || EDTEST )                                                    // Aan het simuleren?
   {
     return true ;                                                 // Ja, gauw klaar
   }
@@ -900,7 +938,7 @@ bool put_modbus_data_regs ( bool was_timeout )
   uint16_t    value ;                                             // Gelezen waarde
   const char* TAG = "put_modbus_data_regs" ;                      // Voor debugging semaphore
   
-  if ( simul )                                                    // Simulatie?
+  if ( simul || EDTEST )                                                    // Simulatie?
   {
     return true ;                                                 // Ja, gauw klaar
   }
@@ -1658,6 +1696,7 @@ const char* analyzeCmd ( const char* str )
 //   field_pin                    // Field/topic Power delivered voor JSON/MQTT                    *
 //   field_pout                   // Field/topic Power returned voor JSON/MQTT                     *
 //   mqtt                         // User, password en broker-IP van MQTT energiemeter             *
+//   mode                         // Control mode at startup, default "nom".                       *
 //   test                         // For test purposes                                             *
 //   simul                        // 1 for modbus simulation                                       *
 //   reset                        // Restart the ESP32                                             *
@@ -1771,7 +1810,7 @@ const char* analyzeCmd ( const char* par, const char* val )
   }
   else if ( argument == "simul" )                     // Modbus simulation?
   {
-    simul = ( ivalue == 1 ) ;                         // Yes, set oaccordingly
+    simul = ( ivalue == 1 ) ;                         // Yes, set accordingly
   }
   else if ( argument == "mincharge" )                 // Minimaal laad/ontlaad vermogen?
   {
@@ -1783,6 +1822,13 @@ const char* analyzeCmd ( const char* par, const char* val )
   else if ( argument == "appassword" )                // Password bij accesspoint mode
   {
     APpassword = value ;                              // Ja, neem over
+  }
+  else if ( argument == "mode" )                      // Mode bij startup?
+  {
+    if ( strstr ("stb,nom,off,man", value.c_str()) )  // Zinnige waarde?
+    {
+      sprintf ( controlmod, "%s", value.c_str() ) ;   // Ja, zet de gewenste control mode
+    }
   }
   else if ( argument == "test" )                      // Test command
   {
@@ -2402,9 +2448,10 @@ void MBtask ( void * parameter )
 //**************************************************************************************************
 void readP1task ( void * parameter )
 {
-  static uint16_t timing = INT16_MAX ;                          // Timer voor 5 seconden
-  static uint16_t err_row = 0 ;                                 // Telt aantal fouten in een rij
-  bool            p1_res ;                                      // Laatste resultaat uitlezen dongle
+  uint16_t timing = INT16_MAX ;                                 // Timer voor 5 seconden
+  uint16_t err_row = 0 ;                                        // Telt aantal fouten in een rij
+  bool     p1_res ;                                             // Laatste resultaat uitlezen dongle
+  uint16_t disconncount = 0 ;                                   // Disconnect count
 
   dbgTaskInfo() ;                                               // Toon info
   while ( true )
@@ -2466,12 +2513,21 @@ void readP1task ( void * parameter )
     if ( mqtt_on )
     {
       mqttclient.loop() ;                                       // Onderhouden van MQTT connectie
-      if ( !mqttclient.connected() )                            // Test of er een verbinding is
+      if ( mqttclient.connected() )                             // Test of er een verbinding is
       {
-        mqttreconnect() ;                                       // Nee, reconnect
+        disconncount = 0 ;                                      // Jawel, reset counter
+      }
+      else
+      {
+        if ( ++disconncount >= 1000 )                           // Lang zonder connectie?
+        {
+          mqttreconnect ( false ) ;                             // Nee, reconnect
+          disconncount = 0 ;                                    // Jawel, reset counter
+        }
       }
     }
   }
+  // Komt hier nooit
 }
 
 
@@ -2487,7 +2543,7 @@ void savetask ( void * parameter )
   int             tinx ;                                    // Grafiek nummer
   const  uint16_t cycletime = 10 ;                          // Cycle time in seconden
   const  int16_t  seconds[] = { 10, 60, 600, 3600 } ;       // Interval per grafiek
-  uint32_t        myseconds = -1 ;                          // Interne klok
+  uint32_t        myseconds = 0 ;                           // Interne klok
   int16_t         pIn, pOut, soc ;                          // Te registreren vermogens
   char            mqjbuf[512] ;                             // Ruimte voor geformatte JSON string
 
@@ -2500,14 +2556,19 @@ void savetask ( void * parameter )
     {
       continue ;                                            // Nee, uitstellen
     }
-    if ( mqtt_on )
+    if ( mqtt_on && mqtt_ok )
     {
       buildJSON ( mqjbuf, sizeof(mqjbuf) ) ;                // Format de JSON string
       if ( ! mqttclient.publish ( nodename, mqjbuf ) )      // Publiceer algemene data
       {
-        dbgprint ( "MQTT publish mislukt, buffersize is %d!",
-                   mqttclient.getBufferSize() ) ;
+        dbgprint ( "MQTT publish mislukt, lengte is %d!",
+                   strlen ( mqjbuf ) ) ;
+        errorcount++ ;                                      // Tel de fouten
       }
+      // else
+      // {
+      //   dbgprint ( "MQTT publish, node %s gelukt", nodename ) ;
+      // }
     }
     claimData ( "savetask" ) ;
     pIn  = rtdata[PWIN].value ;                             // Gemeten (P1) netto vermogen
@@ -2818,12 +2879,15 @@ void setup()
   cmdserver.onNotFound ( handleFileRead ) ;               // Just handle a simple page/file
   cmdserver.begin() ;                                     // Start http server
   MDNS.addService ( "http", "tcp", 80 ) ;                 // Add webinterface service
-  dbgTaskInfo() ;                                         // Show info about main task
   timer = timerBegin ( 1000000 ) ;                        // Timer on 1 MHz
   timerAttachInterrupt ( timer, &timer100 ) ;             // Call timer100() on timer alarm
   timerAlarm ( timer, 100000, true, 0 ) ;                 // 100 msec, auto-reload
   if ( NetworkFound )                                     // Is er een verbinding met een Wifi netwerk?
   {                                                       // Ja, start de processen
+    if ( ! mqtt.isEmpty() )                               // MQTT in gebruik?
+    {
+      mqtt_init() ;                                       // Ja, maak connectie met broker
+    }
     xTaskCreatePinnedToCore (
       MBtask,                                             // Task to read ModBus registers.
       "MBtask",                                           // Name of task.
@@ -2856,11 +2920,8 @@ void setup()
       2,                                                  // priority of the task
       &xsavetask,                                         // Task handle to keep track of created task
       0 ) ;                                               // Run on CPU 0
-    }
-    if ( ! mqtt.isEmpty() )                               // MQTT in gebruik?
-    {
-      mqtt_init() ;                                       // Ja, maak connectie met broker
-    }
+  }
+  dbgTaskInfo() ;                                         // Show info about main task
   delay ( 1000 ) ;                                        // 
   dbgprint ( "Einde setup") ;
 }
@@ -2908,5 +2969,5 @@ void loop()
     dbgprint ( "Foutteller te hoog!  Reset.." ) ;
     resetreq = true ;                                     // Ja, forceer reset
   }
-  delay ( 10 ) ;
+  //delay ( 10 ) ;
 }

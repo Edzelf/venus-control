@@ -28,6 +28,20 @@ bool p1_simul_handle()
   claimData ( "P1" ) ;                                      // Claim data gebied
   rtdata[PWIN].value = simPower[simIndex] -                 // Bepaal levering of opwek
                        rtdata[SETBC].value ;                // Minus de huidige laad-energie
+  if ( rtdata[PWIN].value > 0 )                             // Aan het verbruiken?
+  {
+    if ( rtdata[SOC].value > 12 )                           // Ja, kan er nog wat af?
+    {
+      rtdata[SOC].value-- ;                                 // Ja, lading neemt af
+    }
+  }
+  else                                                      // Aan het terugleveren
+  {
+    if ( rtdata[SOC].value < 98 )                           // Ja, kan er nog wat bij?
+    {
+      rtdata[SOC].value += 3 ;                              // Ja, lading neemt toe
+    }
+  }
   releaseData() ;
   if ( ++simTimer == 8 )                                    // 40 (8 * 5) seconden voorbij?
   {
