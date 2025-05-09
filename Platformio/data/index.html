@@ -27,14 +27,21 @@
  <img src="logo.png" alt="Venus logo"><br>
  <table>
   <tr>
-   <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id0"></canvas> </td>
-   <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id1"></canvas> </td>
+   <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id0"></canvas></td>
+   <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id1"></canvas></td>
    <td bgcolor="#b0b3b7"><canvas id="canvas-gauge-id2"></canvas></td>
   </tr>
   <tr>
     <td bgcolor="#b0b3b7"><input type="text" id="g0_str" size="30" ></td>
     <td bgcolor="#b0b3b7"><input type="text" id="g1_str" size="30" ></td>
     <td bgcolor="#b0b3b7"><input type="text" id="g2_str" size="30" ></td>
+  </tr>
+  <tr>
+   <td colspan="3">
+    <center>
+     <input type="text" id="uptime" size="60" >
+    </center>
+   </td>
   </tr>
  </table>
  <br>
@@ -190,6 +197,10 @@
    var fth = now.getHours() ;
    var ftm = now.getMinutes() ;
    var fts = now.getSeconds() ;
+   var upts ;                                             // Uptime in seconden
+   var uptm ;                                             // Uptime in minuten
+   var upth ;                                             // Uptime in uren
+   var uptd ;                                             // Uptime in dagen
 
    if ( fth < 10 )   fth = "0" + fth ;
    if ( ftm < 10 ) ftm = "0" + ftm ;
@@ -200,6 +211,16 @@
    soc = obj["SOC"] ;
    mode = obj["Controller mode"] ;
    statstr.value = obj["Controller tekst"] ;
+   upts = parseInt ( obj["Uptime"] ) ;                    // Pak uptime in seconds
+   uptd = Math.floor ( upts / 86400 ) ;                   // Bereken aantal dagen
+   upts = upts - ( uptd * 86400 ) ;                       // De rest in seconden
+   upth = Math.floor ( upts / 3600 ) ;                    // Bereken aantal uren
+   upts = upts - ( upth * 3600 ) ;                        // De rest in seconden
+   uptm = Math.floor ( upts / 60 ) ;                      // Bereken aanta minuten
+   upts = upts - ( uptm * 60 ) ;                          // De rest in seconden
+   uptime.value = "Uptime is " + uptd + " dagen, " +      // Format de uptime
+                  upth + " uren, " + uptm +
+                  " minuten en " + upts + " seconden" ;
    chconfig.data.labels.push ( fth + ":" + ftm + ":" + fts ) ;
    chconfig.data.datasets[0].data.push ( pIn ) ;
    chconfig.data.datasets[1].data.push ( pOut ) ;
