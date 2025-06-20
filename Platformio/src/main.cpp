@@ -41,10 +41,12 @@
 // 16-04-2025, ES: Publiceer MQTT data.                                                             *
 // 03-05-2025, ES: Correctie manual setpoint in MQTT.                                               *
 // 07-05-2025, ES: Correctie disconnected MQTT broker.                                              *
+// 09-05-2025, ES: Andere MQTT library.  Uptime. Option om niet in "nom" mode te starten.           *
+// 12-05-2025, ES: Correctie MQTT reconnect. Custum MQTT fields.                                    *
+// 20-06-2025, ES: Variabele maximum laadvermogen erbij.                                            *
 //***************************************************************************************************
-#define EDTEST false
 
-#define VERSION     "Fri, 09 May 2025 11:15:00 GMT"       // Current version
+#define VERSION     "Fri, 20 Jun 2025 08:30:00 GMT"       // Current version
 #include <Arduino.h>
 #include <soc/soc.h>                    // For brown-out detector setting
 #include <soc/rtc_cntl_reg.h>           // For brown-out detector setting
@@ -71,6 +73,7 @@
 #include "Vmodbus.h"                                      // ModBus driver
 #include "config.h"                                       // Configuratie definities
 
+#define MAXJSONNAMESIZE    30                             // Maximale lengte van een JSON key
 #define DEBUG_BUFFER_SIZE 160                             // Regellengte debugregel, exclusief tijd
 #define DEBUG_SAVE_LINES 1000                             // Te bewaren aantal logregels 
 #define NVSBUFSIZE        150                             // Longest expected string for nvsgetstr
@@ -79,14 +82,14 @@
                                                           // Highest ID is MAXINTF - 1
 #define FSIF             true                             // Format SPIFFS if not existing
 
-#define MAXMQTTCONNECTS     5                             // Maximum number of MQTT reconnects before give-up
+#define MAXMQTTCONNECTS    10                             // Maximum number of MQTT reconnects before give-up
 
 #define SERIAL1        Serial                             // Serial via USB
 // RS485 interface pins:
 #define RS485PINRX          7                             // Default pin for RX of RS485 Serial port
 #define RS485PINTX          8                             // Default pin for TX of RS485 Serial port
 #define RS485PINDE          9                             // Pin for enabling xmit of MAX485
-#define NEOPIN             21                             // Pin voor neopixel (38 voor devkit-c)
+#define NEOPIN             21                             // Pin voor neopixel
 
 #define MBtaskbit         0b0001                          // Mask for MBtask event
 #define readP1taskbit     0b0010                          // Mask for p1task
@@ -121,7 +124,6 @@ const char* analyzeCmd ( const char* par, const char* val ) ;
 bool        read_p1_dongle_http() ;
 void        claimData ( const char* p ) ;
 void        releaseData() ;
-bool        mqttreconnect ( bool force ) ;
 
 
 
@@ -191,15 +193,17 @@ AsyncWebServer     cmdserver ( 80 ) ;                   // Instance of embedded 
 WiFiClient         P1_client ;                          // TCP client for P1-dongle connection
 WiFiClient         wmqttclient ;                        // Instance voor mqtt, publicatie data
 PubSubClient       mqttclient ( wmqttclient ) ;         // Client for MQTT subscriber data
-String             dongle ;                             // Type (naam) P1-dongle
-String             dongle_host ;                        // Hostnaam of IP-adres van P1-dongle
 String             mqtt ;                               // Username, password voor MQTT broker
+String             broker ;                             // IP of domeinnaam van de broker uit mqtt
 String             field_pIn ;                          // Field/topic Power delivered voor JSON/MQTT
 String             field_pOut ;                         // Field/topic Power returned voor JSON/MQTT
+String             dongle ;                             // Type (naam) P1-dongle
+String             dongle_host ;                        // Hostnaam of IP-adres van P1-dongle
 u_int16_t          dongle_port = 80 ;                   // TCP Port voor de api, default 80
 String             dongle_api ;                         // Adres van de api
 float              dongle_schaal = 1000.0 ;             // 1000 voor kW, 1 voor Watt
 uint16_t           minCharge = 100 ;                    // Minimale laad/ontlaad vermogen
+uint16_t           maxCharge = 2500 ;                   // Minimale laad/ontlaad vermogen
 bool               P1_host_connected = false ;          // Connection to host is okay
 bool               P1_host_error = false ;              // Connection to host in error
 WiFiClient         otaclient ;                          // For OTA update vanaf update server
@@ -264,21 +268,24 @@ uint32_t white = 0x141414 ;
 uint32_t black = 0x000000 ;
 
 // Code voor register type
-enum mb_data_t { u16, s16, u32, s32, undef } ;          // uint16_t, int16_t, uint32_t, int32_t en undefined
+enum mb_data_t { u16, s16, u32, s32, undef, eot } ;     // uint16_t, int16_t, uint32_t, int32_t,undefined en
+                                                        // einde van tabel
 
 // Code voor input registers. Zie volgorde in rtdata[].
 enum sw_ireg_nr { SOC, ACPW, INVST,                     // State of charge, AC power, Inverter state
                   CHGCC, DISCC,                         // Charging cutoff capacity, discharging cutoff capacity
                   MAXCHG, MAXDIS,                       // Max charge power, max discharge power
                   PWIN, CURBC, SETBC,                   // Power in, current batterij charge, setpoint battery charge
-                  ERRCNT, UPTIME                        // Error count, uptime (seconds)
+                  ERRCNT, UPTIME,                       // Error count, uptime (seconds)
+                  CF1, CF2, CF3, CF4,                   // Custom fields
+                  CF5, CF6, CF7, CF8
 } ;
 
 struct RTInfo_t                                         // Structure of Real-time input data
 {
   uint16_t   mb_regnr ;                                 // ModBus registernummer
   mb_data_t  mb_data_type ;                             // Soort register
-  char       name[30] ;                                 // Naam van het register
+  char       name[MAXJSONNAMESIZE+1] ;                  // Naam van het register
   int16_t    refr_time ;                                // Aantal seconden te wachten bij refreshen
   int16_t    refr_time_cnt ;  	                        // Telt seconden tot aan refr_time
   int32_t    A ;                                        // Ruwe naar fysieke waarde omrekenfactor, deelfactor
@@ -300,9 +307,16 @@ RTInfo_t rtdata[] =                                     // Real-time data from V
     {     0, undef, "Setpoint",            -1, -1,  1,    0 },     // SETBC  - Setpoint laden/ontladen batterij
     {     0, undef, "Fout teller",         -1, -1,  1,    0 },     // ERRCNT - Errorcount
     {     0, undef, "Uptime",              -1, -1,  1,    0 },     // UPTIME - Uptime in seconden
+    {     0,   eot, "",                    60, 60,  1,    0 },     // Custom field 1
+    {     0,   eot, "",                    60, 60,  1,    0 },     // Custom field 2
+    {     0,   eot, "",                    60, 60,  1,    0 },     // Custom field 3
+    {     0,   eot, "",                    60, 60,  1,    0 },     // Custom field 4
+    {     0,   eot, "",                    60, 60,  1,    0 },     // Custom field 5
+    {     0,   eot, "",                    60, 60,  1,    0 },     // Custom field 6
+    {     0,   eot, "",                    60, 60,  1,    0 },     // Custom field 7
+    {     0,   eot, "",                    60, 60,  1,    0 },     // Custom field 8
+    {     0,   eot, "End of table",        -1, -1,  1,    0 },     // Absolue einde van de tabel
 } ;
-
-#define NUMIREGS ( sizeof(rtdata) / sizeof(rtdata[0]) )
 
 // Code voor R/W registers
 enum sw_oreg_nr { CM485, FORCE,                         // RS485 mode, force (dis)charge
@@ -568,14 +582,15 @@ void buildJSON ( char* bjbuf, int16_t len )
   
   claimData ( "buildJSON" ) ;                             // Exclusieve toegang
   rtdata[UPTIME].value = seconds ;                        // Zet uptime in rtdata
-  for ( inx = 0 ; inx < NUMIREGS ; inx++ )                // Ga alle variabelen langs
+  while ( rtdata[inx].mb_data_type != eot )               // Ga alle variabelen langs
   {
     int tmp = rtdata[inx].value ;                         // Get data als integer
     doc[rtdata[inx].name] = String ( tmp ) ;              // Vul een key/value pair
+    inx++ ;
   }
-  doc["Controller tekst"] = controltext ;                 // Vul extra key/value pair
-  doc["Controller mode"] = controlmod ;                   // Ook modus (nom,man,stb,off)
-  doc["Manual setpoint"] = String ( man_setpoint ) ;      // En handmatig setpoint
+  doc["Controller_tekst"] = controltext ;                 // Vul extra key/value pair
+  doc["Controller_mode"] = controlmod ;                   // Ook modus (nom,man,stb,off)
+  doc["Manual_setpoint"] = String ( man_setpoint ) ;      // En handmatig setpoint
   releaseData() ;
   serializeJsonPretty ( doc, bjbuf, len ) ;               // Maak er een string van
 }
@@ -626,12 +641,15 @@ bool mqttreconnect ( bool force )
   retrytime = millis() ;                                  // Set tijdstip laatste poging
   if ( mqttcount > MAXMQTTCONNECTS )                      // Genoeg pogingen?
   {
-    mqtt_on = false ;                                     // JA, uit voor altijd
+    mqtt_on = false ;                                     // Ja, uit voor altijd
     mqtt_ok = false ;
     dbgprint ( "MQTT give-up!" ) ;
-    return res ;                                          // and quit
+    strcpy ( controlmod, "stb" ) ;                        // Ga naar stand-by
+    return res ;                                          // Doorgaan niet zinvol
   }
   mqttcount++ ;                                           // Count the retries
+  mqttclient.setServer ( broker.c_str(), mqttport ) ;     // Specificeer de broker en de poort
+  mqttclient.setCallback ( onMqttMessage ) ;              // Set callback on receive
   res = mqttclient.connect ( nodename,                    // Connect to broker
                              mqttuser.c_str(),            // Met deze user
                              mqttpasswd.c_str() ) ;       // Met dit password
@@ -806,6 +824,26 @@ void chomp ( String &str )
   str.trim() ;                                        // Remove spaces and CR
 }
 
+//**************************************************************************************************
+//                             J S O N R E P L A C E S P A C E S                                   *
+//**************************************************************************************************
+// Vervang de spaties in de JSON keys door underlianes.                                            *
+//**************************************************************************************************
+void  jsonReplaceSpaces()
+{
+  uint8_t inx = 0 ;                                       // Index in rtdata
+  char*   p ;                                             // Will point to next space
+  
+  while ( rtdata[inx].mb_data_type != eot )
+  {
+    while ( ( p = strchr ( rtdata[inx].name, ' '  ) ) )   // Zit er een spatie in deze naam?
+    {
+      *p = '_' ;                                          // Ja, vervang
+    }
+    inx++ ;
+  }
+}
+
 
 //**************************************************************************************************
 //                                      M Q T T _ I N I T                                          *
@@ -817,7 +855,6 @@ void mqtt_init()
 {
   uint16_t inx1 ;                                           // Index in mqtt
   uint16_t inx2 ;                                           // Index in mqtt
-  String   broker ;                                         // IP of domeinnaam van de broker
 
   mqtt_on = true ;                                          // Enable MQTT
   if ( ( inx1 = mqtt.indexOf ( ":" ) ) >= 0  )              // Zoek scheiding tussen username en password
@@ -832,12 +869,10 @@ void mqtt_init()
       //dbgprint ( "broker is %s", broker.c_str() ) ;
     }
   }
-  if ( ! mqttclient.setBufferSize ( 512 ) )                 // Vergroot de buffer
+  if ( ! mqttclient.setBufferSize ( 512, 512 ) )            // Vergroot de buffer
   {
     dbgprint ( "MQTT setbuffersize mislukt!" ) ;            // Maar dat lukt niet
   }
-  mqttclient.setServer ( broker.c_str(), mqttport ) ;       // Specificeer de broker en de poort
-  mqttclient.setCallback ( onMqttMessage ) ;                // Set callback on receive
   mqttreconnect ( true ) ;                                  // Connect to broker
 }
 
@@ -853,19 +888,24 @@ void mqtt_init()
 bool get_modbus_data_regs()
 {
   bool        fres = true ;                                       // Function result, assume positive
-  uint8_t     i ;                                                 // Loop control
+  uint8_t     i = 0 ;                                             // Loop control
   uint16_t    regnr ;                                             // Register te lezen
   mb_data_t   dt ;                                                // Type, bijvoorbeeld "s32"
   uint16_t    n ;                                                 // Aantal register te lezen, 1 = 16 bits woord
   int32_t     value32 ;                                           // Gelezen waarde, 32 bits
   const char* TAG = "get_modbus_data_regs" ;                      // Voor debugging semaphore
 
-  if ( simul || EDTEST )                                                    // Aan het simuleren?
+  if ( simul )                                                    // Aan het simuleren?
   {
     return true ;                                                 // Ja, gauw klaar
   }
-  for ( i = 0 ; i < NUMIREGS ; i++ )                              // Ga de inputs langs
+  for ( i = 0 ; ; i++ )
   {
+    dt = rtdata[i].mb_data_type ;                                 // Data type
+    if ( dt == eot )                                              // Einde van de tabel?
+    {
+      break ;                                                     // Ja, stop
+    }
     regnr = rtdata[i].mb_regnr ;                                  // Register te lezen
     if ( regnr == 0 )                                             // Is het een Modbus register?
     {
@@ -876,7 +916,6 @@ bool get_modbus_data_regs()
       continue ;                                                  // Nee, sla over
     }
     rtdata[i].refr_time_cnt = 0 ;                                 // Ja, reset counter al vast
-    dt = rtdata[i].mb_data_type ;                                 // Data type
     n = 1 ;                                                       // Meestal 1 woord van 16 bits
     if ( ( dt == u32 ) || ( dt == s32 ) )                         // Dubbel word?
     {
@@ -938,7 +977,7 @@ bool put_modbus_data_regs ( bool was_timeout )
   uint16_t    value ;                                             // Gelezen waarde
   const char* TAG = "put_modbus_data_regs" ;                      // Voor debugging semaphore
   
-  if ( simul || EDTEST )                                                    // Simulatie?
+  if ( simul )                                                    // Simulatie?
   {
     return true ;                                                 // Ja, gauw klaar
   }
@@ -1222,8 +1261,8 @@ bool read_p1_dongle_http()
   // End of headers reached
   if ( ( jlen > 0 ) && ( jlen <= ( sizeof(json_buf) -2 ) ) )
   {
-    bread = P1_client.readBytes ( (uint8_t*)json_buf,           // Lees minimaal de JSON string
-                                  sizeof(json_buf) ) ;
+    bread = P1_client.readBytes ( (uint8_t*)json_buf,           // Lees de JSON string
+                                   sizeof(json_buf) ) ;
     P1_client.stop() ;
     //dbgprint ( "json length is %d", bread ) ;
     if ( bread >= jlen )
@@ -1656,9 +1695,45 @@ String handle_mb_manip ( String argument, String value )
 
 
 //**************************************************************************************************
+//                                   M Q T T E X T R A S                                           *
+//**************************************************************************************************
+// Zet extra registers in de rtdata tabel.                                                         *
+//**************************************************************************************************
+void mqttExtras ( int key, String &value )
+{
+  uint16_t  inx1, inx2 ;                                  // Indexen in value
+  uint16_t  regnr ;                                       // Modbus registernummer
+  String    rtype ;                                       // Registertype als string
+  mb_data_t mbdtype ;                                     // Idem als mb_data_t
+  String    naam ;                                        // Naam van de JSON variabele
+
+  inx1 = value.indexOf ( "," ) ;                          // Zoek eerste scheidingsteken
+  if ( inx1 >= 0 )                                        // Gevonden?
+  {
+    regnr = mqtt.substring ( 0, inx1++ ).toInt() ;        // Ja, zet registernummer klaar
+    inx2 = value.indexOf ( ",", inx1 ) ;                  // Zoek 2e scheidingsteken
+    if ( ( inx2 - inx1 ) == 3 )                           // Gevonden?
+    {
+      rtype = value.substring ( inx1, inx2++ ) ;          // Ja, haal datatype, bijv. "s16"
+      mbdtype = strToDataTyp ( rtype.c_str() ) ;          // Converteer naar mb_data_t
+      naam = value.substring ( inx2 ) ;                   // Laatste deel is naam
+      if ( ( naam.length() > 0 ) &&                       // Redelijke naam?
+           ( naam.length() <= MAXJSONNAMESIZE ) )
+      {
+        rtdata[key].mb_regnr = regnr ;                    // Zet in rtdata
+        rtdata[key].mb_data_type = mbdtype ;
+        sprintf ( rtdata[key].name, "%s", naam.c_str() ) ;
+      }
+    }
+  }
+}
+
+
+
+//**************************************************************************************************
 //                                     A N A L Y Z E C M D                                         *
 //**************************************************************************************************
-// Handling of the various commands from remote webclient or SERIAL1.                               *
+// Handling of the various commands from remote webclient or SERIAL1.                              *
 // Version for handling string with: <parameter>=<value>                                           *
 //**************************************************************************************************
 const char* analyzeCmd ( const char* str )
@@ -1696,7 +1771,9 @@ const char* analyzeCmd ( const char* str )
 //   field_pin                    // Field/topic Power delivered voor JSON/MQTT                    *
 //   field_pout                   // Field/topic Power returned voor JSON/MQTT                     *
 //   mqtt                         // User, password en broker-IP van MQTT energiemeter             *
+//   mqtt_extra<n>                // Voeg extra ModBus registers toe aan MQTT output.              *
 //   mode                         // Control mode at startup, default "nom".                       *
+//   nospace                      // Vervang spaties in MQTT keys door underlines.                 *
 //   test                         // For test purposes                                             *
 //   simul                        // 1 for modbus simulation                                       *
 //   reset                        // Restart the ESP32                                             *
@@ -1712,6 +1789,7 @@ const char* analyzeCmd ( const char* str )
 //   mbget_xxx                    // Get Modbus real-time register. Example: mbget_u32=2202        *
 //   mbset_xxx                    // Set Modbus R/W register. Example: mbset_u32=41200,0           *
 //   mincharge                    // Minimale laad/ontlaad vermogen, default 100W.                 *
+//   maxcharge                    // Maximale laad vermogen, default 2500W.                        *
 //   appassword                   // Password indie AP wordt aangemaakt, default is nodename.      *
 //**************************************************************************************************
 const char* analyzeCmd ( const char* par, const char* val )
@@ -1764,9 +1842,15 @@ const char* analyzeCmd ( const char* par, const char* val )
   {
     dongle_schaal = ivalue ;                          // Ja, set factor 1000 of 1
   }
-  else if ( argument.startsWith ( "mqtt" ) )          // Gegevens voor MQTT?
+  else if ( argument == "mqtt" )                      // Gegevens voor MQTT?
   {
     mqtt = value ;                                    // Ja, zet gegevens klaar
+  }
+  else if ( argument.startsWith ( "mqtt_extra_" ) )   // Extra ModBus registers voor MQTT output?
+  {
+    int key = argument.substring(11).toInt() & 7 ;    // Ja, bepaal plaats in tabel 0..7 relatief
+    key += (int)CF1 ;                                 // Plaats absoluut
+    mqttExtras ( key, value ) ;                       // Zet register in rtdata
   }
   else if ( argument == "field_pin" )                 // JSON item of MQTT topic voor power delivered?
   {
@@ -1819,6 +1903,13 @@ const char* analyzeCmd ( const char* par, const char* val )
       minCharge = ivalue ;                            // Redelijke waarde overnemen
     }
   }
+  else if ( argument == "maxcharge" )                 // Maximale laad/ontlaad vermogen?
+  {
+    if ( ( ivalue <= 2500 ) && ( ivalue >= 250 ) )    // Ja, niet al te gek?
+    {
+      maxCharge = ivalue ;                            // Redelijke waarde overnemen
+    }
+  }
   else if ( argument == "appassword" )                // Password bij accesspoint mode
   {
     APpassword = value ;                              // Ja, neem over
@@ -1830,12 +1921,21 @@ const char* analyzeCmd ( const char* par, const char* val )
       sprintf ( controlmod, "%s", value.c_str() ) ;   // Ja, zet de gewenste control mode
     }
   }
+  else if ( argument == "nospaces" )                  // Spaties in keywords JSON ongewenst?
+  {
+    if ( ivalue != 0 )                                // Ja, optie op 1 gezet?
+    {
+      jsonReplaceSpaces() ;                           // Ja, vervang de spaties
+    }
+  }
   else if ( argument == "test" )                      // Test command
   {
-    for ( int i = 0 ; i < NUMIREGS ; i++ )
+    int i = 0 ;                                       // Index in rtdata
+    while ( rtdata[i].mb_data_type != eot )
     {
       dbgprint ( "Modbus reg [%-20s] is %d",
                  rtdata[i].name, rtdata[i].value ) ;
+      i++ ;
     }
     dbgprint ( "Stack MBtask      is %4d", uxTaskGetStackHighWaterMark ( xMBtask ) ) ;
     dbgprint ( "Stack readP1task  is %4d", uxTaskGetStackHighWaterMark ( xreadP1task ) ) ;
@@ -2685,6 +2785,10 @@ void controltask ( void * parameter )
         {
           pOut = - rtdata[MAXCHG].value ;                   // Ja, beperk laden
         }
+        if ( abs ( pOut ) > maxCharge )                     // Groter dan geconfigureerde limiet?
+        {
+          pOut = - maxCharge ;                              // Ja, beperk laden
+        }
       }
       if ( abs ( pOut ) < minCharge  )                      // Minder dan minimum laad/ontlaad vermogen?
       {
@@ -2756,7 +2860,7 @@ void setup()
   MBsem = xSemaphoreCreateMutex() ;                         // Semaphore for Modbus
   taskEvents = xEventGroupCreate() ;                        // Creeer eventflags voor triggering tasks
   neopixel.begin () ;                                       // Init neopixel
-  for ( uint8_t i = 0 ; i < 16 ; i++ )                      // Geef tijd voor aansluiten USB kabel
+  for ( uint8_t i = 0 ; i < 20 ; i++ )                      // Geef tijd voor aansluiten USB kabel
   {
     setpixel ( white ) ;                                    // LED wit
     delay ( 150 ) ;
