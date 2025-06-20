@@ -33,6 +33,7 @@ Ontwikkkeling:
 * 25-03-2025 - Betere ModBus driver. Ondersteuning voor Homewizard P1 dongle.
 * 08-04-2025 - Energie meting via MQTT.  Instelling voor kW of Watt meting.
 * 10-04-2025 - Eenvoudig flashen van de software via webbrowser inclusief preset van WiFi credentials.
+* 20-06-2025 - Maximale laadvermogen van de batterij is nu configurerbaar.
 
 Printontwerp:
 De print is ontworpen en febrabriceerd in samenwerking met PCBWay.  PCBWay is bekend om zijn uitstekende kwaliteit en zeer snelle levering.  De gefabriceerde print ziet er zo uit:
